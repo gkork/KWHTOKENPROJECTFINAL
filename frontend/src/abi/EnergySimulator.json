@@ -1,0 +1,6 @@
+[
+  {"type":"constructor","inputs":[],"stateMutability":"nonpayable"},
+  {"type":"function","name":"setToken","inputs":[{"name":"_token","type":"address"}],"outputs":[],"stateMutability":"nonpayable"},
+  {"type":"function","name":"simulate","inputs":[],"outputs":[],"stateMutability":"nonpayable"},
+  {"type":"function","name":"token","inputs":[],"outputs":[{"name":"","type":"address"}],"stateMutability":"view"}
+]
