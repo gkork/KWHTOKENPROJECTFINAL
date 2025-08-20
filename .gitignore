@@ -26,6 +26,17 @@ broadcast/
 frontend/.env
 frontend/.env.*
 
+backend/node_modules/
+backend/build/
+backend/dist/
+backend/coverage/
+backend/logs/
+backend/.env
+backend/.env.*
+
+
+
+
 # Επιτρέπουμε μόνο τα templates
 !.env.example
 !frontend/.env.local.example

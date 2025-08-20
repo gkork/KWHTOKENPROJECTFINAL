@@ -10,15 +10,30 @@ import {
   printEnvDebug,
 } from "./config";
 
-// ABI imports (πιάνει είτε artifacts με { abi: [...] } είτε σκέτο array)
+// ABI imports
 import KWHTokenBuild from "./abi/KWHTokenABI.json";
 import EnergyBillingBuild from "./abi/EnergyBillingABI.json";
+
+// P2P Marketplace component
+import Marketplace from "./components/Marketplace";
 
 const KWHTokenABI = KWHTokenBuild.abi ?? KWHTokenBuild;
 const EnergyBillingABI = EnergyBillingBuild.abi ?? EnergyBillingBuild;
 
-// Enum για το UI
-const PM = { PREPAID: 0, PAYG: 1 };
+/**
+ * ΠΡΟΣΟΧΗ: Διαφορετικές αρίθμησεις enums στα δύο συμβόλαια!
+ *
+ * EnergyBilling.PaymentModel:  UNSET=0, PREPAID=1, PAYG=2
+ * KWHToken.PaymentModel:       PREPAID=0, PAYG=1
+ */
+const BILL_PM = { UNSET: 0, PREPAID: 1, PAYG: 2 };
+const TOKEN_PM = { PREPAID: 0, PAYG: 1 };
+
+// helpers: μετατροπές string <-> enums
+const toBillEnum = (s) => (s === "payg" ? BILL_PM.PAYG : BILL_PM.PREPAID);
+const toTokenEnum = (s) => (s === "payg" ? TOKEN_PM.PAYG : TOKEN_PM.PREPAID);
+const fromBillEnum = (n) =>
+  n === BILL_PM.PAYG ? "payg" : n === BILL_PM.PREPAID ? "prepaid" : "unset";
 
 export default function App() {
   // Wallet / network
@@ -30,13 +45,13 @@ export default function App() {
   const [billingC, setBillingC] = useState(null);
 
   // Prices & balances
-  const [fixedPriceWei, setFixedPriceWei] = useState(null);   // BigInt
-  const [fluctPriceWei, setFluctPriceWei] = useState(null);   // BigInt
+  const [fixedPriceWei, setFixedPriceWei] = useState(null);
+  const [fluctPriceWei, setFluctPriceWei] = useState(null);
   const [kwhDecimals, setKwhDecimals] = useState(18);
   const [kwhBalance, setKwhBalance] = useState("0.0");
 
   // Billing state
-  const [billingModel, setBillingModel] = useState("prepaid"); // 'prepaid' | 'payg'
+  const [billingModel, setBillingModel] = useState("unset"); // 'unset' | 'prepaid' | 'payg'
   const [pendingBillWei, setPendingBillWei] = useState("0");
   const [pendingConsumption, setPendingConsumption] = useState("0");
 
@@ -44,7 +59,7 @@ export default function App() {
   const [prepaidKwhInput, setPrepaidKwhInput] = useState("");
   const [status, setStatus] = useState("");
 
-  // Guards (για MetaMask request διπλό)
+  // Guards
   const didInit = useRef(false);
   const isRequesting = useRef(false);
 
@@ -70,7 +85,7 @@ export default function App() {
     return new ethers.Contract(EnergyBillingAddress, EnergyBillingABI, signer);
   }
 
-  // Init (σιωπηλή ανάγνωση λογαριασμού + listeners)
+  // Init (silent)
   useEffect(() => {
     if (didInit.current) return;
     didInit.current = true;
@@ -80,7 +95,6 @@ export default function App() {
       if (!window.ethereum || !provider) return;
 
       try {
-        // 1) σιωπηλή προσπάθεια: δεν ανοίγει popup
         const accs = await window.ethereum.request({ method: "eth_accounts" });
         const acc = accs?.[0] ?? "";
         setAccount(acc);
@@ -95,7 +109,6 @@ export default function App() {
 
         if (acc) await refreshAll(acc, t, b);
 
-        // listeners
         window.ethereum.on?.("accountsChanged", async (accs2) => {
           const a = accs2?.[0] || "";
           setAccount(a);
@@ -114,7 +127,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [provider]);
 
-  // Σύνδεση με κουμπί
+  // Connect
   async function connectWallet() {
     if (!window.ethereum) return alert("Χρειάζεται MetaMask");
     if (isRequesting.current) return;
@@ -142,7 +155,6 @@ export default function App() {
     try {
       setStatus("Φόρτωση…");
 
-      // Τιμές σε wei / kWh
       const [fx, fl] = await Promise.all([
         t.fixedPricePerKWH(),
         t.fluctuatingPricePerKWH(),
@@ -150,7 +162,6 @@ export default function App() {
       setFixedPriceWei(fx);
       setFluctPriceWei(fl);
 
-      // Decimals & υπόλοιπο
       const dec = await t.decimals?.().catch(() => 18);
       const decN = Number(dec) || 18;
       setKwhDecimals(decN);
@@ -158,15 +169,15 @@ export default function App() {
       const bal = await t.balanceOf(user);
       setKwhBalance(ethers.formatUnits(bal, decN));
 
-      // Μοντέλο χρήστη (από EnergyBilling)
-      const model = await b.getModel(user);
-      setBillingModel(Number(model) === PM.PAYG ? "payg" : "prepaid");
+      // --- Πρότυπη ανάγνωση από EnergyBilling ---
+      const billModelEnum = await b.getModel(user); // 0/1/2
+      setBillingModel(fromBillEnum(Number(billModelEnum)));
 
-      // Pending bill (KWHToken.getUserDetails)
-      const details = await t.getUserDetails(user); // [paymentModel, consumption, pendingBill, generatedKWH]
-      setPendingBillWei(details[2]?.toString?.() || "0");
+      // Token details για bill (στο token κρατάς pendingBill)
+      const details = await t.getUserDetails(user); // struct User
+      setPendingBillWei(details.pendingBill?.toString?.() || details[2]?.toString?.() || "0");
 
-      // Pending consumption (EnergyBilling.users)
+      // Το pendingConsumption ζει στο EnergyBilling
       const urec = await b.users(user); // { model, pendingConsumption }
       setPendingConsumption(urec?.pendingConsumption?.toString?.() || "0");
 
@@ -177,37 +188,57 @@ export default function App() {
     }
   }
 
-  // Αλλαγή μοντέλου με guard για "already set"
+  // Αλλαγή μοντέλου (σωστή επιλογή setModel/changeModel)
   async function changeModel(nextStr) {
-    if (!billingC) return;
-    if (
-      (nextStr === "payg" && billingModel === "payg") ||
-      (nextStr === "prepaid" && billingModel === "prepaid")
-    ) {
-      return; // ήδη ρυθμισμένο
-    }
+    if (!billingC || !account) return;
     try {
       setStatus("Αλλαγή μοντέλου…");
-      const nextEnum = nextStr === "payg" ? PM.PAYG : PM.PREPAID;
-      const tx = await billingC.setModel(nextEnum);
-      await tx.wait();
-      setBillingModel(nextStr);
 
-      // optional: register στο token (αγνόησε αν already registered)
+      const currentEnum = Number(await billingC.getModel(account)); // 0/1/2
+      const nextBillEnum = toBillEnum(nextStr);
+
+      if (currentEnum === nextBillEnum) {
+        setStatus("Ήδη στο ζητούμενο μοντέλο.");
+        return;
+      }
+
+      if (currentEnum === BILL_PM.UNSET) {
+        // Πρώτο set
+        const tx = await billingC.setModel(nextBillEnum);
+        await tx.wait();
+      } else {
+        // Αλλαγή
+        const tx = await billingC.changeModel(nextBillEnum);
+        await tx.wait();
+      }
+
+      // (προαιρετικά) ενημέρωσε και το Token με το ΔΙΚΟ ΤΟΥ enum
       try {
-        const tx2 = await tokenC.registerUser(nextEnum);
-        await tx2.wait();
-      } catch {}
+        if (tokenC) {
+          const tokenEnum = toTokenEnum(nextStr); // 0/1
+          const tx2 = await tokenC.registerUser(tokenEnum);
+          await tx2.wait();
+        }
+      } catch (_) {
+        // αγνόησέ το αν αποτύχει, δεν είναι κρίσιμο
+      }
 
       await refreshAll(account);
       setStatus("Έγινε.");
     } catch (e) {
       console.error(e);
-      setStatus("Αποτυχία αλλαγής μοντέλου (δες console).");
+      // Φιλικό μήνυμα για γνωστό λόγο
+      if (String(e?.message || "").toLowerCase().includes("outstanding consumption")) {
+        setStatus("Δεν μπορείς να αλλάξεις από PAYG όσο υπάρχει ανεξόφλητη κατανάλωση.");
+      } else if (String(e?.message || "").toLowerCase().includes("already set")) {
+        setStatus("Το μοντέλο έχει ήδη οριστεί· χρησιμοποίησε αλλαγή (changeModel).");
+      } else {
+        setStatus("Αποτυχία αλλαγής μοντέλου (δες console).");
+      }
     }
   }
 
-  // Prepaid αγορά: value = kWh * fixedPriceWei
+  // Prepaid αγορά
   async function handlePrepaidBuy(e) {
     e.preventDefault();
     if (!tokenC || !fixedPriceWei || !prepaidKwhInput) return;
@@ -226,12 +257,12 @@ export default function App() {
     }
   }
 
-  // PAYG προσομοίωση (ΚΑΛΟΥΜΕ ΤΟ TOKEN — ΟΧΙ τον simulator)
+  // PAYG προσομοίωση (μέσω Token)
   async function handleSimulateConsumption() {
     if (!tokenC) return;
     try {
       setStatus("Προσομοίωση…");
-      const tx = await tokenC.simulateConsumption(); // <- αυτό είναι το σωστό
+      const tx = await tokenC.simulateConsumption();
       await tx.wait();
       await refreshAll(account);
       setStatus("Έγινε.");
@@ -241,7 +272,7 @@ export default function App() {
     }
   }
 
-  // Πληρωμή λογαριασμού
+  // Πληρωμή λογαριασμού (στο token)
   async function handlePayBill() {
     if (!tokenC) return;
     if (!pendingBillWei || pendingBillWei === "0") return;
@@ -279,7 +310,6 @@ export default function App() {
     }
   }
 
-  // Helpers
   const fmtETH = (v) => {
     try { return `${ethers.formatEther(v)} ETH`; } catch { return "—"; }
   };
@@ -307,17 +337,20 @@ export default function App() {
         <label htmlFor="billing-select"><strong>Μοντέλο χρέωσης:</strong>{' '}</label>
         <select
           id="billing-select"
-          value={billingModel}
+          value={billingModel === "unset" ? "prepaid" : billingModel}
           onChange={(e) => changeModel(e.target.value)}
           style={{ padding: "6px 10px", fontSize: 14 }}
         >
           <option value="prepaid">Prepaid</option>
           <option value="payg">Pay-As-You-Go</option>
         </select>
+        {billingModel === "unset" && (
+          <span style={{ marginLeft: 8, opacity: 0.7 }}>(πρώτη ρύθμιση)</span>
+        )}
       </div>
 
       {/* PREPAID */}
-      {billingModel === "prepaid" && (
+      {(billingModel === "prepaid" || billingModel === "unset") && (
         <section style={{ padding: 16, border: "1px solid #eee", borderRadius: 8, marginBottom: 16 }}>
           <h3 style={{ marginTop: 0 }}>Prepaid</h3>
           <p style={{ marginTop: -6, opacity: 0.8 }}>
@@ -366,6 +399,10 @@ export default function App() {
           </div>
         </section>
       )}
+
+      {/* P2P Marketplace */}
+      <hr style={{ margin: "24px 0" }} />
+      <Marketplace />
 
       <div style={{ marginTop: 18, color: "#444" }}>{status}</div>
     </div>
