@@ -7,17 +7,31 @@ import MarketplaceBuild from "../abi/MarketplaceABI.json";
 import KWHTokenBuild from "../abi/KWHTokenABI.json";
 
 const MarketplaceABI = MarketplaceBuild.abi ?? MarketplaceBuild;
-const KWHTokenABI    = KWHTokenBuild.abi ?? KWHTokenBuild;
 
-/* ---------- Provider ---------- */
+// ✅ Ελάχιστο ERC-20 ABI που εγγυάται ότι υπάρχουν αυτές οι μέθοδοι
+const ERC20_MIN_ABI = [
+  "function decimals() view returns (uint8)",
+  "function balanceOf(address) view returns (uint256)",
+  "function allowance(address,address) view returns (uint256)",
+  "function approve(address,uint256) returns (bool)",
+];
+
+// Αν το δικό σου ABI είναι array, το ενώνουμε με το ελάχιστο ERC-20.
+// Αλλιώς, χρησιμοποιούμε μόνο το ελάχιστο (σίγουρα δουλεύει).
+const KWHTokenABI_RAW = KWHTokenBuild.abi ?? KWHTokenBuild;
+const TOKEN_ABI = Array.isArray(KWHTokenABI_RAW)
+  ? [...KWHTokenABI_RAW, ...ERC20_MIN_ABI]
+  : ERC20_MIN_ABI;
+
+/* ------------------------------- Provider hook ------------------------------ */
 function useProvider() {
-  return useMemo(() => {
-    if (!window.ethereum) return null;
-    return new ethers.BrowserProvider(window.ethereum);
-  }, []);
+  return useMemo(
+    () => (window.ethereum ? new ethers.BrowserProvider(window.ethereum) : null),
+    []
+  );
 }
 
-/* ---------- ABI helpers ---------- */
+/* --------------------------------- Helpers --------------------------------- */
 const isUintLike = (t) => /^(u?int)(\d+)?$/i.test(t || "");
 
 function findFuncByShape(
@@ -29,19 +43,19 @@ function findFuncByShape(
     try {
       const f = iface.getFunction(n);
       if (!f) continue;
-      const okCount = inCount == null || (f.inputs?.length === inCount);
-      const okUint  = !inAllUint || f.inputs?.every((i) => isUintLike(i.type));
-      const okPay   = !payableOnly || f.stateMutability === "payable";
-      const okNV    = !nonViewOnly || !["view","pure"].includes(f.stateMutability || "");
+      const okCount = inCount == null || f.inputs?.length === inCount;
+      const okUint = !inAllUint || f.inputs?.every((i) => isUintLike(i.type));
+      const okPay = !payableOnly || f.stateMutability === "payable";
+      const okNV = !nonViewOnly || !["view", "pure"].includes(f.stateMutability || "");
       if (okCount && okUint && okPay && okNV) return f;
     } catch {}
   }
   for (const frag of iface.fragments) {
     if (frag.type !== "function") continue;
-    const okCount = inCount == null || (frag.inputs?.length === inCount);
-    const okUint  = !inAllUint || frag.inputs?.every((i) => isUintLike(i.type));
-    const okPay   = !payableOnly || frag.stateMutability === "payable";
-    const okNV    = !nonViewOnly || !["view","pure"].includes(frag.stateMutability || "");
+    const okCount = inCount == null || frag.inputs?.length === inCount;
+    const okUint = !inAllUint || frag.inputs?.every((i) => isUintLike(i.type));
+    const okPay = !payableOnly || frag.stateMutability === "payable";
+    const okNV = !nonViewOnly || !["view", "pure"].includes(frag.stateMutability || "");
     if (okCount && okUint && okPay && okNV) return frag;
   }
   return null;
@@ -57,43 +71,46 @@ function getEventFilter(contract, names) {
 
 const evArg = (ev, idx) => (ev?.args ? ev.args[idx] : undefined);
 
-/* ---------- Component ---------- */
-export default function Marketplace() {
+/* -------------------------------- Component -------------------------------- */
+export default function Marketplace({ account: propAccount }) {
   const provider = useProvider();
 
-  const [account, setAccount]         = useState("");
-  const [connected, setConnected]     = useState(false);
+  const [account, setAccount] = useState("");
+  const [connected, setConnected] = useState(false);
 
-  const [market, setMarket]           = useState(null);
-  const [status, setStatus]           = useState("");
+  const [market, setMarket] = useState(null);
+  const [status, setStatus] = useState("");
 
-  const [orders, setOrders]           = useState([]);
+  const [orders, setOrders] = useState([]);
 
-  const [amountKwh, setAmountKwh]     = useState("");
+  const [amountKwh, setAmountKwh] = useState("");
   const [pricePerKwhEth, setPricePerKwhEth] = useState("");
 
   // Token-related
-  const [tokenAddr, setTokenAddr]     = useState("");
+  const [tokenAddr, setTokenAddr] = useState("");
   const [tokenDecimals, setTokenDecimals] = useState(18);
-  const [tokenBal, setTokenBal]       = useState(0n);
+  const [tokenBal, setTokenBal] = useState(0n);
   const [tokenAllowance, setTokenAllowance] = useState(0n);
 
   const tokenContract = useMemo(() => {
     if (!provider || !ethers.isAddress(tokenAddr)) return null;
-    return new ethers.Contract(tokenAddr, KWHTokenABI, provider);
+    // ✅ Χρησιμοποιούμε το TOKEN_ABI (KWHTokenABI + ERC20_MIN_ABI)
+    return new ethers.Contract(tokenAddr, TOKEN_ABI, provider);
   }, [provider, tokenAddr]);
 
+  const effectiveAccount = (propAccount || account || "").toLowerCase();
   const didInit = useRef(false);
 
   async function ensureConnected() {
     if (!window.ethereum) throw new Error("Απαιτείται MetaMask");
     const accs = await window.ethereum.request({ method: "eth_requestAccounts" });
-    const acc  = accs?.[0] ?? "";
+    const acc = accs?.[0] ?? "";
     setAccount(acc);
     setConnected(Boolean(acc));
     return acc;
   }
 
+  /* ------------------------------ Initial load ----------------------------- */
   useEffect(() => {
     if (didInit.current) return;
     didInit.current = true;
@@ -103,48 +120,60 @@ export default function Marketplace() {
         if (!provider) return;
 
         if (!ethers.isAddress(MarketplaceAddress)) {
-          setStatus("Άκυρη διεύθυνση Marketplace. Διόρθωσε το REACT_APP_MARKET_ADDR και κάνε restart.");
+          setStatus(
+            "Άκυρη διεύθυνση Marketplace. Διόρθωσε το REACT_APP_MARKET_ADDR και κάνε restart."
+          );
           return;
         }
 
         const accs = await window.ethereum.request({ method: "eth_accounts" });
-        const acc  = accs?.[0] ?? "";
+        const acc = accs?.[0] ?? "";
         setAccount(acc);
         setConnected(Boolean(acc));
 
         const m = new ethers.Contract(MarketplaceAddress, MarketplaceABI, provider);
         setMarket(m);
 
-        // Διαβάζουμε το token από το συμβόλαιο marketplace
         const tAddr = await m.token();
         setTokenAddr(tAddr);
 
-        const t = new ethers.Contract(tAddr, KWHTokenABI, provider);
+        const t = new ethers.Contract(tAddr, TOKEN_ABI, provider);
         let dec = 18;
-        try { dec = Number(await t.decimals()); } catch {}
+        try {
+          dec = Number(await t.decimals());
+        } catch {}
         setTokenDecimals(dec);
 
-        await refreshTokenInfo(m, t, acc);
+        if (acc) await refreshTokenInfo(m, t, acc);
         await refreshOrders(m);
 
-        window.ethereum.on?.("accountsChanged", async (accs2) => {
+        const onAccounts = async (accs2) => {
           const a = accs2?.[0] || "";
           setAccount(a);
           setConnected(Boolean(a));
           await refreshTokenInfo(m, t, a);
           await refreshOrders(m);
-        });
-        window.ethereum.on?.("chainChanged", async () => {
+        };
+        const onChain = async () => {
           await refreshTokenInfo(m, t, account);
           await refreshOrders(m);
-        });
+        };
+        window.ethereum?.on?.("accountsChanged", onAccounts);
+        window.ethereum?.on?.("chainChanged", onChain);
+
+        return () => {
+          window.ethereum?.removeListener?.("accountsChanged", onAccounts);
+          window.ethereum?.removeListener?.("chainChanged", onChain);
+        };
       } catch (e) {
         console.error(e);
         setStatus("Αποτυχία αρχικοποίησης (δες console).");
       }
     })();
-  }, [provider, account]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [provider]);
 
+  /* ---------------------------- Token info refresh ------------------------- */
   async function refreshTokenInfo(m = market, t = tokenContract, acc = account) {
     if (!m || !t || !acc) return;
     try {
@@ -152,20 +181,28 @@ export default function Marketplace() {
         t.balanceOf(acc),
         t.allowance(acc, MarketplaceAddress),
       ]);
-      setTokenBal(bal);
-      setTokenAllowance(allw);
+      setTokenBal(ethers.toBigInt(bal ?? 0));
+      setTokenAllowance(ethers.toBigInt(allw ?? 0));
     } catch (e) {
       console.error(e);
     }
   }
 
-  /* ----------- Orders (events) ----------- */
+  useEffect(() => {
+    (async () => {
+      const acc = effectiveAccount;
+      if (!acc) return;
+      await refreshTokenInfo(market, tokenContract, acc);
+    })();
+  }, [effectiveAccount, tokenContract, tokenAddr, provider, market]);
+
+  /* ------------------------------ Orders refresh --------------------------- */
   async function refreshOrders(contract = market) {
     if (!provider || !contract) return;
     try {
       setStatus("Φόρτωση αγγελιών…");
 
-      const createdF = getEventFilter(contract, ["Listed"]);
+      const createdF = getEventFilter(contract, ["Listed", "OrderCreated", "Created"]);
       if (!createdF) {
         setOrders([]);
         setStatus("Δεν βρέθηκε event Listed στο ABI.");
@@ -176,17 +213,24 @@ export default function Marketplace() {
       const map = new Map();
 
       for (const ev of created) {
-        const id     = evArg(ev, 0)?.toString();
+        const id = evArg(ev, 0)?.toString();
         const seller = evArg(ev, 1);
-        const amount = ethers.toBigInt(evArg(ev, 2) ?? 0);           // σε token units
-        const price  = ethers.toBigInt(evArg(ev, 3) ?? 0);           // wei / kWh
+        const amount = ethers.toBigInt(evArg(ev, 2) ?? 0);
+        const price = ethers.toBigInt(evArg(ev, 3) ?? 0);
         const expiry = Number(evArg(ev, 4) ?? 0);
         if (!id) continue;
-
-        map.set(id, { id, seller, kwh: amount, remaining: amount, priceWeiPerKwh: price, expiry, canceled:false });
+        map.set(id, {
+          id,
+          seller,
+          kwh: amount,
+          remaining: amount,
+          priceWeiPerKwh: price,
+          expiry,
+          canceled: false,
+        });
       }
 
-      const cancelledF = getEventFilter(contract, ["Cancelled"]);
+      const cancelledF = getEventFilter(contract, ["Cancelled", "OrderCancelled"]);
       if (cancelledF) {
         const cancelled = await contract.queryFilter(cancelledF, 0);
         for (const ev of cancelled) {
@@ -195,7 +239,7 @@ export default function Marketplace() {
         }
       }
 
-      const purchasedF = getEventFilter(contract, ["Purchased"]);
+      const purchasedF = getEventFilter(contract, ["Purchased", "OrderPurchased"]);
       if (purchasedF) {
         const purchased = await contract.queryFilter(purchasedF, 0);
         for (const ev of purchased) {
@@ -208,8 +252,13 @@ export default function Marketplace() {
         }
       }
 
-      const list = [...map.values()].filter(o => !o.canceled && (o.remaining ?? 0n) > 0n);
-      list.sort((a,b) => BigInt(a.id) - BigInt(b.id));
+      const list = [...map.values()].filter((o) => !o.canceled && (o.remaining ?? 0n) > 0n);
+      list.sort((a, b) => {
+        const ax = BigInt(a.id);
+        const bx = BigInt(b.id);
+        return ax < bx ? -1 : ax > bx ? 1 : 0;
+      });
+
       setOrders(list);
       setStatus(list.length ? "" : "Δεν υπάρχουν αγγελίες.");
     } catch (e) {
@@ -218,46 +267,51 @@ export default function Marketplace() {
     }
   }
 
-  /* ----------- Create (list) ----------- */
+  /* ------------------------------ Create listing --------------------------- */
   async function handleCreate(e) {
     e.preventDefault();
     try {
       if (!market) throw new Error("No marketplace");
-      await ensureConnected();
-
+      const acc = await ensureConnected();
       const signer = await provider.getSigner();
+
       const m = market.connect(signer);
+      const t = tokenContract?.connect(signer);
+      if (!t) throw new Error("Token contract missing");
 
-      const frag = findFuncByShape(m, {
-        names: ["list", "create", "listOrder", "createListing"],
-        inCount: 3, inAllUint: true, nonViewOnly: true,
-      });
-      if (!frag) throw new Error("Δεν βρέθηκε list(amount, priceWeiPerKwh, expiry) στο ABI.");
-
-      // ΠΟΣΟΤΗΤΑ σε token units με βάση τα decimals
       const amountUnits = ethers.parseUnits((amountKwh || "0").toString(), tokenDecimals);
-      const pWei        = ethers.parseEther(pricePerKwhEth || "0");
-      const expiry      = BigInt(Math.floor(Date.now()/1000) + 7*24*3600);
+      const pWei = ethers.parseEther(pricePerKwhEth || "0");
+      const expiry = BigInt(Math.floor(Date.now() / 1000) + 7 * 24 * 3600);
 
       if (amountUnits <= 0n || pWei <= 0n) {
         setStatus("Συμπλήρωσε ποσότητα & τιμή > 0.");
         return;
       }
 
-      // Έλεγχος υπολοίπου
-      if (tokenBal < amountUnits) {
-        setStatus(`Δεν έχεις αρκετά KWH. Υπόλοιπο: ${ethers.formatUnits(tokenBal, tokenDecimals)} kWh`);
+      const bal = await t.balanceOf(acc);
+      if (ethers.toBigInt(bal) < amountUnits) {
+        setStatus(
+          `Δεν έχεις αρκετά KWH. Υπόλοιπο: ${ethers.formatUnits(bal, tokenDecimals)} kWh`
+        );
         return;
       }
 
-      // Έλεγχος allowance -> approve αν χρειάζεται
-      if (tokenAllowance < amountUnits) {
+      // ✅ auto-approve αν χρειάζεται
+      const currAllw = await t.allowance(acc, MarketplaceAddress);
+      if (ethers.toBigInt(currAllw) < amountUnits) {
         setStatus("Έγκριση (approve) token…");
-        const tSigner = tokenContract.connect(signer);
-        const txA = await tSigner.approve(MarketplaceAddress, amountUnits);
+        const txA = await t.approve(MarketplaceAddress, amountUnits);
         await txA.wait();
-        await refreshTokenInfo(m, tokenContract, account);
+        await refreshTokenInfo(m, tokenContract, acc);
       }
+
+      const frag = findFuncByShape(m, {
+        names: ["list", "create", "listOrder", "createListing"],
+        inCount: 3,
+        inAllUint: true,
+        nonViewOnly: true,
+      });
+      if (!frag) throw new Error("Δεν βρέθηκε list(amount, priceWeiPerKwh, expiry) στο ABI.");
 
       setStatus(`Δημιουργία… (call: ${frag.name})`);
       const tx = await m[frag.name](amountUnits, pWei, expiry);
@@ -266,15 +320,15 @@ export default function Marketplace() {
       setAmountKwh("");
       setPricePerKwhEth("");
       await refreshOrders(m);
-      await refreshTokenInfo(m, tokenContract, account);
+      await refreshTokenInfo(m, tokenContract, acc);
       setStatus("Η αγγελία δημιουργήθηκε.");
     } catch (e) {
       console.error(e);
-      setStatus("Αποτυχία δημιουργίας (δες console).");
+      setStatus("Αποτυχία δημιουργίας (δες console). Συνήθης λόγος: δεν έχει γίνει approve.");
     }
   }
 
-  /* ----------- Cancel ----------- */
+  /* --------------------------------- Cancel -------------------------------- */
   async function handleCancel(id) {
     try {
       if (!market) return;
@@ -283,7 +337,9 @@ export default function Marketplace() {
 
       const frag = findFuncByShape(m, {
         names: ["cancel", "cancelOrder"],
-        inCount: 1, inAllUint: true, nonViewOnly: true,
+        inCount: 1,
+        inAllUint: true,
+        nonViewOnly: true,
       });
       if (!frag) throw new Error("Δεν βρέθηκε cancel(id) στο ABI.");
 
@@ -298,7 +354,7 @@ export default function Marketplace() {
     }
   }
 
-  /* ----------- Buy ----------- */
+  /* ----------------------------------- Buy --------------------------------- */
   async function handleBuy(o) {
     try {
       if (!market) return;
@@ -306,17 +362,41 @@ export default function Marketplace() {
       const m = market.connect(signer);
 
       const frag = findFuncByShape(m, {
-        names: ["purchase"],
-        inCount: 2, inAllUint: true, payableOnly: true, nonViewOnly: true,
+        names: ["purchase", "buy"],
+        inCount: 2,
+        inAllUint: true,
+        payableOnly: true,
+        nonViewOnly: true,
       });
-      if (!frag) throw new Error("Δεν βρέθηκε purchase(id, amount).");
+      if (!frag) throw new Error("Δεν βρέθηκε purchase(id, amount) στο ABI.");
 
-      const amount = o.remaining ?? o.kwh;
-      const total  = await m.quoteCost(amount, o.priceWeiPerKwh);
+      const amount = ethers.toBigInt(o.remaining ?? o.kwh);
+      if (amount <= 0n) {
+        setStatus("Μηδενική ποσότητα.");
+        return;
+      }
+
+      let total = 0n;
+      const denom = 10n ** BigInt(tokenDecimals);
+      try {
+        const q = await m.quoteCost(amount, o.priceWeiPerKwh);
+        total = ethers.toBigInt(q ?? 0);
+      } catch {
+        total = (o.priceWeiPerKwh * amount + (denom - 1n)) / denom;
+      }
+      if (total <= 0n) {
+        setStatus("Μηδενικό κόστος υπολογίστηκε, έλεγχος τιμών.");
+        return;
+      }
 
       setStatus(`Αγορά… (call: ${frag.name})`);
-      const tx = await m[frag.name](o.id, amount, { value: total });
-      await tx.wait();
+      try {
+        const tx = await m[frag.name](o.id, amount, { value: total });
+        await tx.wait();
+      } catch {
+        const tx = await m[frag.name](o.id, amount, { value: total + 1n });
+        await tx.wait();
+      }
 
       await refreshOrders(m);
       setStatus("Ολοκληρώθηκε η αγορά.");
@@ -326,13 +406,16 @@ export default function Marketplace() {
     }
   }
 
+  /* --------------------------------- UI utils ------------------------------- */
   const fmtETH = (wei) => {
     try { return `${ethers.formatEther(wei)} ETH`; } catch { return "—"; }
   };
   const fmtKWH = (u) => {
-    try { return `${ethers.formatUnits(u ?? 0n, tokenDecimals)} kWh`; } catch { return `${u?.toString()}`; }
+    try { return `${ethers.formatUnits(u ?? 0n, tokenDecimals)} kWh`; }
+    catch { return `${u?.toString?.() ?? "0"} kWh`; }
   };
 
+  /* ---------------------------------- Render -------------------------------- */
   return (
     <section style={{ padding: 16, border: "1px solid #eee", borderRadius: 8 }}>
       <h3 style={{ marginTop: 0 }}>P2P Marketplace</h3>
@@ -343,12 +426,16 @@ export default function Marketplace() {
         </button>
       )}
 
-      {/* Token info */}
       <div style={{ fontSize: 13, opacity: 0.8, marginBottom: 8 }}>
-        <div>Token: {tokenAddr ? `${tokenAddr.slice(0,6)}…${tokenAddr.slice(-4)}` : "—"} (decimals {tokenDecimals})</div>
-        <div>Υπόλοιπο: {fmtKWH(tokenBal)} — Allowance προς Marketplace: {fmtKWH(tokenAllowance)}</div>
+        <div>
+          Token: {tokenAddr ? `${tokenAddr.slice(0, 6)}…${tokenAddr.slice(-4)}` : "—"} (decimals {tokenDecimals})
+        </div>
+        <div>
+          Υπόλοιπο: {fmtKWH(tokenBal)} — Allowance προς Marketplace: {fmtKWH(tokenAllowance)}
+        </div>
       </div>
 
+      {/* Create listing: ONE button (auto-approve αν χρειάζεται) */}
       <form
         onSubmit={handleCreate}
         style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}
@@ -393,17 +480,20 @@ export default function Marketplace() {
         </thead>
         <tbody>
           {orders.map((o) => {
-            // Προαιρετικά θα μπορούσαμε να καλέσουμε quoteCost για ακριβές σύνολο
-            const naiveTotal = o.remaining * o.priceWeiPerKwh; // μπορεί να είναι υπερεκτίμηση αν amount έχει decimals
+            const denom = 10n ** BigInt(tokenDecimals);
+            const naiveTotal = (o.priceWeiPerKwh * (o.remaining ?? 0n) + (denom - 1n)) / denom;
+            const isSeller = effectiveAccount === (o.seller || "").toLowerCase();
+            // ✅ πιο σταθερό key για να φύγουν τα duplicate key warnings
+            const rowKey = `${o.id}-${o.seller}-${o.remaining?.toString?.() ?? ""}`;
             return (
-              <tr key={o.id} style={{ borderTop: "1px solid #eee" }}>
+              <tr key={rowKey} style={{ borderTop: "1px solid #eee" }}>
                 <td>{o.id}</td>
                 <td title={o.seller}>{o.seller?.slice(0, 6)}…{o.seller?.slice(-4)}</td>
                 <td>{fmtKWH(o.remaining)}</td>
                 <td>{fmtETH(o.priceWeiPerKwh)}</td>
                 <td>{fmtETH(naiveTotal)}</td>
                 <td style={{ display: "flex", gap: 8 }}>
-                  {account?.toLowerCase() === o.seller?.toLowerCase() ? (
+                  {isSeller ? (
                     <button onClick={() => handleCancel(o.id)}>Cancel</button>
                   ) : (
                     <button onClick={() => handleBuy(o)}>Αγορά</button>

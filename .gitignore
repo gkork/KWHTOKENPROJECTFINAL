@@ -1,52 +1,100 @@
-# ---------- Node / React ----------
+# =========================
+# Node / JS / TS (όλα τα πακέτα)
+# =========================
 node_modules/
-frontend/node_modules/
-frontend/build/
-frontend/.cache/
-frontend/coverage/
+.npm/
+.nvm/
+*.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-package-lock.json # <- αφαίρεσέ το αν θες να το παρακολουθείς
+pnpm-debug.log*
+.pnpm-store/
 
-# ---------- Foundry / Solidity ----------
+# Build / coverage / caches (οπουδήποτε)
+build/
+dist/
 out/
-cache/
-broadcast/
+coverage/
+.cache/
+.parcel-cache/
+.temp/
+.temp/**
 
-# Αν χρησιμοποιείς forge install και δεν θέλεις να ανεβάζεις τα deps, ξε-σχολίασε:
-# lib/
+# Vite / Next / Storybook κ.λπ.
+.next/
+.storybook-out/
+storybook-static/
 
-# ---------- Env & Secrets ----------
-# Μην ανεβάζεις ποτέ τα πραγματικά env
+# =========================
+# Env & Secrets (ΠΑΝΤΟΥ)
+# =========================
+# Αγνόησε όλα τα .env σε οποιονδήποτε φάκελο
 .env
 .env.*
 *.env
 *.env.*
-frontend/.env
-frontend/.env.*
+**/.env
+**/.env.*
+**/*.env
+**/*.env.*
 
+# Επιτρέπουμε ΜΟΝΟ τα templates
+!**/.env.example
+!frontend/.env.local.example
+!backend/.env.example
+
+# =========================
+# Backend (Express / Node)
+# =========================
 backend/node_modules/
 backend/build/
 backend/dist/
 backend/coverage/
 backend/logs/
-backend/.env
-backend/.env.*
+backend/tmp/
+backend/.cache/
 
+# =========================
+# Frontend (React)
+# =========================
+frontend/node_modules/
+frontend/build/
+frontend/dist/
+frontend/coverage/
+frontend/.cache/
 
+# Κράτα τα ABI JSON του UI
+!frontend/src/abi/*.json
 
+# =========================
+# Solidity / Foundry
+# =========================
+out/
+cache/
+broadcast/
+# Αν ΔΕΝ θέλεις να ανεβάζεις τα deps του forge, αποσχολίασε:
+# lib/
 
-# Επιτρέπουμε μόνο τα templates
-!.env.example
-!frontend/.env.local.example
+# (Προαιρετικά, αν έχεις Hardhat/Truffle artifacts)
+artifacts/
 
-# ---------- IDE / OS junk ----------
+# =========================
+# Python helpers (αν έχεις)
+# =========================
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# =========================
+# IDE / OS junk
+# =========================
 .vscode/
 .idea/
+*.iml
 *.swp
+*.swo
 .DS_Store
 Thumbs.db
-
-# ---------- Misc ----------
-coverage/
+.history/

@@ -5,20 +5,11 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {ERC20Burnable} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
-/**
- *  KWHToken
- *  - ERC20 με 18 δεκαδικά (1 token = 1 kWh)
- *  - Τιμή kWh (fixed & fluctuating) σε wei/kWh
- *  - PREPAID: αγορά kWh προκαταβολικά (buyTokens)
- *  - PAYG: προκύπτει pendingBill
- *  - simulateConsumption: παίρνει kWh από EnergySimulator και ενημερώνει τον χρήστη
- */
 interface IEnergySimulator {
     function simulateConsumption() external returns (uint256 kwh);
 }
 
 contract KWHToken is ERC20, ERC20Burnable, Ownable {
-    // ====== Τύποι / Δομές ======
     enum PaymentModel { PREPAID, PAYG }
 
     struct User {
@@ -28,14 +19,22 @@ contract KWHToken is ERC20, ERC20Burnable, Ownable {
         uint256 generatedKWH;    // kWh που έχει "παράγει"/επιβραβευθεί
     }
 
-    // ====== Κατάσταση ======
-    IEnergySimulator public energySimulator;      // getter στο ABI: energySimulator()
-    uint256 public fixedPricePerKWH;             // wei per kWh
-    uint256 public fluctuatingPricePerKWH;       // wei per kWh (για PAYG)
+    // ---------- Τιμολόγηση ----------
+    uint256 public fixedPricePerKWH;        // wei/kWh (PREPAID deficits)
+    uint256 public fluctuatingPricePerKWH;  // wei/kWh (fallback αν δεν είναι dynamic)
 
-    mapping(address => User) public users;       // ABI accessor: users(address) -> fields
+    // Δυναμική fluctuating τιμή (0.00008–0.0002 ETH/kWh) ανά 15'
+    uint256 public constant MIN_FLUCT_PRICE = 8e13;   // 0.00008 ETH
+    uint256 public constant MAX_FLUCT_PRICE = 2e14;   // 0.00020 ETH
+    uint256 public constant FLUCT_INTERVAL = 15 minutes;
+    bool    public useDynamicFluct = true;
+    bytes32 public fluctSeed; // για deterministic pseudo-random εντός παραθύρου
 
-    // ====== Events ======
+    // ---------- Λοιπά ----------
+    IEnergySimulator public energySimulator;
+    mapping(address => User) public users;
+
+    // ---------- Events ----------
     event TokensBought(address indexed user, uint256 amount);
     event TokensBurned(address indexed user, uint256 amount);
     event TokensRewarded(address indexed user, uint256 amount);
@@ -45,9 +44,8 @@ contract KWHToken is ERC20, ERC20Burnable, Ownable {
     event BillPaid(address indexed user, uint256 weiAmount);
     event UserRegistered(address indexed user, PaymentModel model);
     event PriceUpdated(string priceType, uint256 newValue);
+    event FluctPriceUsed(address indexed user, uint256 priceWeiPerKwh, uint256 intervalIndex);
 
-    // ====== Constructor ======
-    // constructor(address simulator, address initialOwner)
     constructor(address simulator, address initialOwner)
         ERC20("KWHToken", "KWH")
         Ownable(initialOwner)
@@ -55,44 +53,69 @@ contract KWHToken is ERC20, ERC20Burnable, Ownable {
         require(simulator != address(0), "sim=0");
         energySimulator = IEnergySimulator(simulator);
 
-        // default τιμές για demo (μπορείς να τις αλλάξεις με τα setters)
-        fixedPricePerKWH = 1e14;        // 0.0001 ETH per kWh
-        fluctuatingPricePerKWH = 2e14;  // 0.0002 ETH per kWh
+        fixedPricePerKWH = 1e14;        // 0.0001 ETH
+        fluctuatingPricePerKWH = 2e14;  // default fallback 0.0002 ETH
+        // seed για deterministic υπολογισμό (μπορείς να το αλλάξεις με setter αν θες)
+        fluctSeed = keccak256(abi.encodePacked(simulator, initialOwner, block.timestamp, address(this)));
     }
 
-    // ====== View helpers ======
+    // ---------- View helpers ----------
     function decimals() public pure override returns (uint8) { return 18; }
 
-    function getUserDetails(address acc)
-        external
-        view
-        returns (User memory)
-    {
+    function getUserDetails(address acc) external view returns (User memory) {
         return users[acc];
     }
 
-    // ====== Διαχείριση τιμών (owner) ======
+    // Τρέχουσα fluctuating τιμή (dynamic ή fallback)
+    function currentFluctuatingPricePerKWH() public view returns (uint256) {
+        if (!useDynamicFluct) return fluctuatingPricePerKWH;
+
+        uint256 idx = block.timestamp / FLUCT_INTERVAL; // παράθυρο 15'
+        // deterministic "τυχαίο" μέσα στο παράθυρο
+        uint256 rand = uint256(keccak256(abi.encodePacked(idx, fluctSeed, address(this))));
+        uint256 range = MAX_FLUCT_PRICE - MIN_FLUCT_PRICE;
+        // ομοιόμορφη χαρτογράφηση στο [MIN, MAX]
+        return MIN_FLUCT_PRICE + (rand % (range + 1));
+    }
+
+    function secondsUntilNextFluct() external view returns (uint256) {
+        uint256 next = ((block.timestamp / FLUCT_INTERVAL) + 1) * FLUCT_INTERVAL;
+        return next - block.timestamp;
+    }
+
+    // ---------- Διαχείριση τιμών (owner) ----------
     function setFixedPricePerKWH(uint256 newPrice) external onlyOwner {
         require(newPrice > 0, "price=0");
         fixedPricePerKWH = newPrice;
         emit PriceUpdated("fixedPricePerKWH", newPrice);
     }
 
+    // Fallback/στατική fluctuating (αν useDynamicFluct=false)
     function setFluctuatingPricePerKWH(uint256 newPrice) external onlyOwner {
-        require(newPrice > 0, "price=0");
+        require(newPrice >= MIN_FLUCT_PRICE && newPrice <= MAX_FLUCT_PRICE, "out of range");
         fluctuatingPricePerKWH = newPrice;
         emit PriceUpdated("fluctuatingPricePerKWH", newPrice);
     }
 
-    // ====== Εγγραφή / αλλαγή μοντέλου χρήστη ======
+    function setUseDynamicFluct(bool useDyn) external onlyOwner {
+        useDynamicFluct = useDyn;
+        emit PriceUpdated("useDynamicFluct", useDyn ? 1 : 0);
+    }
+
+    function setFluctSeed(bytes32 newSeed) external onlyOwner {
+        require(newSeed != bytes32(0), "seed=0");
+        fluctSeed = newSeed;
+        emit PriceUpdated("fluctSeed", uint256(newSeed));
+    }
+
+    // ---------- Εγγραφή χρήστη ----------
     function registerUser(uint8 model) external {
         require(model <= uint8(PaymentModel.PAYG), "bad model");
         users[msg.sender].paymentModel = PaymentModel(model);
         emit UserRegistered(msg.sender, PaymentModel(model));
     }
 
-    // ====== Αγορά PREPAID kWh (mint) ======
-    // value = kWh * fixedPricePerKWH
+    // ---------- Αγορά PREPAID kWh (mint) ----------
     function buyTokens() external payable {
         require(fixedPricePerKWH > 0, "fixed=0");
         require(msg.value >= fixedPricePerKWH, "value too low");
@@ -104,7 +127,7 @@ contract KWHToken is ERC20, ERC20Burnable, Ownable {
         emit TokensBought(msg.sender, amt);
     }
 
-    // ====== Επιβράβευση παραγωγού (mint) ======
+    // ---------- Επιβράβευση παραγωγού ----------
     function rewardTokens(address prosumer, uint256 kwh) external onlyOwner {
         require(prosumer != address(0), "zero addr");
         uint256 amt = kwh * (10 ** decimals());
@@ -115,24 +138,20 @@ contract KWHToken is ERC20, ERC20Burnable, Ownable {
         emit KWHGenerated(prosumer, kwh);
     }
 
-    // ====== Προσομοίωση κατανάλωσης (καλεί τον EnergySimulator) ======
-    // Για demo αφήνουμε public – αν θέλεις, βάλε onlyOwner/onlySimulator.
+    // ---------- Προσομοίωση κατανάλωσης ----------
     function simulateConsumption() external {
-        // Πάρε kWh από τον simulator
         uint256 kwh = energySimulator.simulateConsumption();
         users[msg.sender].consumption += kwh;
         emit KWHConsumed(msg.sender, kwh);
 
         if (users[msg.sender].paymentModel == PaymentModel.PREPAID) {
-            // Κατανάλωση από υπόλοιπο token
+            // Κατανάλωση από υπόλοιπο token, έλλειμμα → fixed τιμή
             uint256 need = kwh * (10 ** decimals());
-
             uint256 bal = balanceOf(msg.sender);
             if (bal >= need) {
                 _burn(msg.sender, need);
                 emit TokensBurned(msg.sender, need);
             } else {
-                // Ό,τι δεν καλύπτεται, το μετατρέπουμε σε λογαριασμό με fixed τιμή
                 if (bal > 0) {
                     _burn(msg.sender, bal);
                     emit TokensBurned(msg.sender, bal);
@@ -148,15 +167,18 @@ contract KWHToken is ERC20, ERC20Burnable, Ownable {
                 }
             }
         } else {
-            // PAYG: λογαριασμός με τη fluctuating τιμή
-            uint256 weiAmt = kwh * fluctuatingPricePerKWH;
+            // PAYG: λογαριασμός με ΔΥΝΑΜΙΚΗ fluctuating τιμή της στιγμής
+            uint256 price = currentFluctuatingPricePerKWH();
+            uint256 weiAmt = kwh * price;
             users[msg.sender].pendingBill += weiAmt;
+
+            uint256 idx = block.timestamp / FLUCT_INTERVAL;
+            emit FluctPriceUsed(msg.sender, price, idx);
             emit BillGenerated(msg.sender, weiAmt);
         }
     }
 
-    // ====== Πληρωμή λογαριασμού ======
-    // Αν πληρώσει παραπάνω, μετατρέπουμε το extra σε PREPAID tokens με fixed τιμή.
+    // ---------- Πληρωμή λογαριασμού ----------
     function payBill() external payable {
         uint256 bill = users[msg.sender].pendingBill;
         require(bill > 0, "no bill");
@@ -166,7 +188,7 @@ contract KWHToken is ERC20, ERC20Burnable, Ownable {
         users[msg.sender].pendingBill = bill - payWei;
         emit BillPaid(msg.sender, payWei);
 
-        // Αν περίσσεψε value πάνω από τον λογαριασμό ⇒ αγορά PREPAID
+        // Αν περισσέψει, γίνεται PREPAID αγορά
         if (msg.value > payWei && fixedPricePerKWH > 0) {
             uint256 extra = msg.value - payWei;
             uint256 kwh = extra / fixedPricePerKWH;
@@ -178,7 +200,7 @@ contract KWHToken is ERC20, ERC20Burnable, Ownable {
         }
     }
 
-    // ====== (προαιρετικά) Withdraw της ETH δεξαμενής στον owner ======
+    // ---------- Withdraw ----------
     function withdraw(address payable to, uint256 amount) external onlyOwner {
         if (amount == 0) amount = address(this).balance;
         require(amount <= address(this).balance, "insufficient");
