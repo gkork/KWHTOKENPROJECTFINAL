@@ -12,7 +12,7 @@ import {
   MARKET_ADDR,
 } from "./config.js";
 
-// ✅ σωστό path: src/abis/*
+// σωστά paths abis
 import KWHTokenABIJson      from "./abis/KWHTokenABI.json"      assert { type: "json" };
 import EnergyBillingABIJson from "./abis/EnergyBillingABI.json" assert { type: "json" };
 import MarketplaceABIJson   from "./abis/MarketplaceABI.json"   assert { type: "json" };
@@ -32,7 +32,7 @@ const MarketplaceABI   = MarketplaceABIJson.abi   ?? MarketplaceABIJson;
 function clean(v) {
   if (v == null) return v;
   if (typeof v === "bigint") return v.toString();
-  if (typeof v === "string") return v; // keep hex as-is
+  if (typeof v === "string") return v;
   if (Array.isArray(v)) return v.map(clean);
   if (typeof v === "object") {
     const o = {};
@@ -45,10 +45,25 @@ function clean(v) {
   return v;
 }
 
+// μικρό cache blockNumber -> Date
+const blockCache = new Map();
+async function getBlockTime(blockNumber) {
+  if (blockCache.has(blockNumber)) return blockCache.get(blockNumber);
+  const b = await provider.getBlock(blockNumber);
+  const ms = (b?.timestamp ?? Math.floor(Date.now() / 1000)) * 1000;
+  const dt = new Date(ms);
+  blockCache.set(blockNumber, dt);
+  if (blockCache.size > 5000) blockCache.clear();
+  return dt;
+}
+
 async function upsertTx({ contract, event, args, log, receipt }) {
+  const bn = log?.blockNumber ?? receipt?.blockNumber ?? null;
+  const blockTime = bn != null ? await getBlockTime(bn) : new Date();
+
   const doc = {
     chainId    : CHAIN_ID,
-    blockNumber: log?.blockNumber ?? receipt?.blockNumber ?? null,
+    blockNumber: bn,
     blockHash  : log?.blockHash ?? receipt?.blockHash ?? null,
     txHash     : log?.transactionHash ?? receipt?.hash ?? "",
     logIndex   : typeof log?.index === "number" ? log.index : -1,
@@ -59,6 +74,7 @@ async function upsertTx({ contract, event, args, log, receipt }) {
     to         : (receipt?.to ?? "").toLowerCase(),
     value      : clean(receipt?.value ?? "0"),
     status     : "confirmed",
+    blockTime, // <-- αποθηκεύουμε block timestamp ως Date
   };
 
   await Tx.updateOne(
@@ -82,7 +98,6 @@ async function getStartBlock(addr) {
   const c = await Cursor.findOne({ key });
   if (c && Number.isFinite(c.blockNumber)) return c.blockNumber;
 
-  // env START_BLOCK, αλλιώς latest - 2000
   if (Number.isFinite(START_BLOCK) && START_BLOCK >= 0) return START_BLOCK;
 
   const latest = await provider.getBlockNumber();
@@ -91,11 +106,7 @@ async function getStartBlock(addr) {
 
 async function setCursor(addr, blockNumber) {
   const key = await cursorKey(addr);
-  await Cursor.updateOne(
-    { key },
-    { $set: { blockNumber } },
-    { upsert: true }
-  );
+  await Cursor.updateOne({ key }, { $set: { blockNumber } }, { upsert: true });
 }
 
 /* ---------------- backfill & sync range ---------------- */
@@ -128,13 +139,11 @@ async function backfill(contract, abi) {
   const batch = 2000;
 
   let latest = await provider.getBlockNumber();
-  // reorg safety: μέχρι latest - CONFIRMATIONS
   latest = Math.max(0, latest - Number(CONFIRMATIONS || 0));
 
   let start = await getStartBlock(contract.target);
   if (start > latest) return;
 
-  // console.log(`[indexer] backfill ${contract.target} from ${start} → ${latest} (conf=${CONFIRMATIONS})`);
   while (start <= latest) {
     const end = Math.min(start + batch, latest);
     await syncRange(contract, abi, start, end);
@@ -143,7 +152,7 @@ async function backfill(contract, abi) {
   }
 }
 
-/* ---------------- live listen (ethers v6 safe) ---------------- */
+/* ---------------- live listen ---------------- */
 
 function liveListen(contract, abi) {
   const names = allEventNames(abi);
@@ -160,7 +169,7 @@ function liveListen(contract, abi) {
           named[inp.name || `arg${i}`] = clean(rawArgs[i]);
         });
 
-        const r = await getReceiptSafe(ev); // ασφαλές σε v6
+        const r = await getReceiptSafe(ev);
         await upsertTx({ contract, event: name, args: named, log: ev, receipt: r });
       } catch (e) {
         console.error(`[indexer] live "${name}" failed:`, e?.message || e);
@@ -177,7 +186,7 @@ export async function startIndexer() {
   if (ethers.isAddress(ADDRS.KWHToken)) {
     contracts.push({ name: "KWHToken", c: new ethers.Contract(ADDRS.KWHToken, KWHTokenABI, provider), abi: KWHTokenABI });
   } else {
-    console.warn("[indexer] KWHToken address missing (KWHTOKEN_ADDR)");
+    console.warn("[indexer] KWHToken address missing (KWH_TOKEN_ADDRESS)");
   }
 
   if (ethers.isAddress(ADDRS.Billing)) {
@@ -188,25 +197,20 @@ export async function startIndexer() {
     contracts.push({ name: "Market", c: new ethers.Contract(ADDRS.Market, MarketplaceABI, provider), abi: MarketplaceABI });
   }
 
-  // αρχικό full sync
+  // αρχικό sync
   await Promise.all(contracts.map(({ c, abi }) => backfill(c, abi)));
   console.log("[indexer] initial sync complete");
 
   // live events
-  for (const { c, abi } of contracts) {
-    liveListen(c, abi);
-  }
+  for (const { c, abi } of contracts) liveListen(c, abi);
 
-  // tailing σε κάθε νέο block (δουλεύει με HTTP polling ή WebSocket)
+  // tailing new blocks
   let syncing = false;
-  provider.on("block", async (bn) => {
+  provider.on("block", async () => {
     if (syncing) return;
     syncing = true;
     try {
-      // μικρό sync από cursor → latest για κάθε contract
-      for (const { c, abi, name } of contracts) {
-        await backfill(c, abi);
-      }
+      for (const { c, abi } of contracts) await backfill(c, abi);
     } catch (e) {
       console.error("[indexer] tail sync error:", e?.message || e);
     } finally {

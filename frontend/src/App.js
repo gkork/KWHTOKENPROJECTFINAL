@@ -1,54 +1,37 @@
+// src/App.js
 import React from "react";
-import { BrowserRouter, Routes, Route, Navigate, Link } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 
 // Auth
 import { AuthProvider, useAuth } from "./auth/AuthProvider";
 import { PrivateRoute, GuestRoute } from "./auth/RouteGuards";
 
-// Σελίδες
+// Pages
 import Login from "./pages/Login";
 import Signup from "./pages/Signup";
 import DApp from "./pages/DApp";
 import Analytics from "./pages/Analytics";
 
+// Components
+import NavBar from "./components/NavBar";
+
+/** Redirects "/" based on session state */
 function RootRedirect() {
   const { user, loading } = useAuth();
-  if (loading) return null; // ή spinner
+  if (loading) return <div className="container">Φόρτωση…</div>;
   return <Navigate to={user ? "/app" : "/login"} replace />;
-}
-
-// Μικρό navbar που εμφανίζεται ΜΟΝΟ όταν είσαι logged-in
-function NavBar() {
-  const { user } = useAuth();
-  if (!user) return null;
-  return (
-    <nav
-      style={{
-        padding: 12,
-        borderBottom: "1px solid #eee",
-        display: "flex",
-        gap: 12,
-      }}
-    >
-      <Link to="/app">DApp</Link>
-      <Link to="/analytics">Στατιστικά</Link>
-      {/* Αν θες ξεχωριστή σελίδα marketplace:
-          <Link to="/market">Marketplace</Link>
-       */}
-    </nav>
-  );
 }
 
 export default function App() {
   return (
     <BrowserRouter>
       <AuthProvider>
-        <NavBar /> {/* ← ΠΑΝΤΑ διαθέσιμο όταν είσαι logged-in */}
+        <NavBar />
         <Routes>
-          {/* Ρίζα: redirect δυναμικά ανάλογα με session */}
+          {/* Root */}
           <Route path="/" element={<RootRedirect />} />
 
-          {/* Ιδιωτικές σελίδες */}
+          {/* Private pages */}
           <Route
             path="/app"
             element={
@@ -85,7 +68,7 @@ export default function App() {
           />
 
           {/* 404 */}
-          <Route path="*" element={<div>Δεν βρέθηκε η σελίδα.</div>} />
+          <Route path="*" element={<div className="container">Δεν βρέθηκε η σελίδα.</div>} />
         </Routes>
       </AuthProvider>
     </BrowserRouter>

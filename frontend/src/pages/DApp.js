@@ -1,3 +1,4 @@
+// src/pages/DApp.js
 /* eslint-env es2020 */
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ethers } from "ethers";
@@ -40,11 +41,11 @@ export default function DApp() {
 
   // Prices & balances
   const [fixedPriceWei, setFixedPriceWei] = useState(null);
-  const [fluctPriceWei, setFluctPriceWei] = useState(null); // ΔΥΝΑΜΙΚΗ τιμή
+  const [fluctPriceWei, setFluctPriceWei] = useState(null);
   const [fluctSecondsLeft, setFluctSecondsLeft] = useState(0);
   const [kwhDecimals, setKwhDecimals] = useState(18);
   const [kwhBalance, setKwhBalance] = useState("0");
-  const [kwhBalanceUnits, setKwhBalanceUnits] = useState(0n); // ← raw BigInt balance
+  const [kwhBalanceUnits, setKwhBalanceUnits] = useState(0n); // raw BigInt balance
 
   // Billing state
   const [billingModel, setBillingModel] = useState("unset");
@@ -81,7 +82,6 @@ export default function DApp() {
     }
   }
   function fmtKWHUnits(units, decimals) {
-    // εμφανίζουμε ΑΚΕΡΑΙΕΣ kWh (floor), ακόμα κι αν το token έχει 18 decimals.
     try {
       const s = ethers.formatUnits(units ?? 0n, decimals ?? 18);
       return s.includes(".") ? s.split(".")[0] : s;
@@ -115,7 +115,6 @@ export default function DApp() {
 
         await refreshAll(acc, t, b);
 
-        // live refresh όταν έρθει Transfer που σε αφορά
         const onTransfer = (from, to) => {
           if (!acc) return;
           if (
@@ -127,7 +126,6 @@ export default function DApp() {
         };
         t.on("Transfer", onTransfer);
 
-        // listeners metamask
         window.ethereum.on?.("accountsChanged", async (accs2) => {
           const a = accs2?.[0] || "";
           setAccount(a);
@@ -139,7 +137,6 @@ export default function DApp() {
           await refreshAll(account, t, b);
         });
 
-        // cleanup
         return () => {
           try { t.off("Transfer", onTransfer); } catch {}
         };
@@ -179,7 +176,6 @@ export default function DApp() {
     try {
       setStatus("Φόρτωση…");
 
-      // prices (fixed + ΔΥΝΑΜΙΚΗ fluctuating + countdown)
       const [fx, flDyn, secsLeft] = await Promise.all([
         t.fixedPricePerKWH(),
         t.currentFluctuatingPricePerKWH(),
@@ -189,17 +185,14 @@ export default function DApp() {
       setFluctPriceWei(flDyn);
       setFluctSecondsLeft(Number(secsLeft));
 
-      // decimals
       let dec = 18;
       try { dec = Number(await t.decimals()); } catch {}
       setKwhDecimals(dec);
 
-      // balances
-      const bal = await t.balanceOf(user); // BigInt
-      setKwhBalanceUnits(bal);             // ← κρατάμε raw units για το Marketplace
+      const bal = await t.balanceOf(user);
+      setKwhBalanceUnits(bal);
       setKwhBalance(fmtKWHUnits(bal, dec));
 
-      // billing model & pending
       const billModelEnum = await b.getModel(user);
       setBillingModel(fromBillEnum(Number(billModelEnum)));
 
@@ -226,7 +219,6 @@ export default function DApp() {
     const id = setInterval(() => {
       setFluctSecondsLeft((s) => {
         if (s > 1) return s - 1;
-        // 0 -> νέο παράθυρο: ανανέωσε τιμή
         refreshAll(account);
         return 0;
       });
@@ -287,23 +279,23 @@ export default function DApp() {
     try {
       setStatus("Αγορά…");
 
-      // αγορά μόνο ακέραιες kWh
       const kwhInt = Math.max(0, Math.floor(Number(prepaidKwhInput || "0")));
       if (!kwhInt) {
         setStatus("Δώσε ακέραιο πλήθος kWh > 0.");
         return;
       }
 
-      // ποσότητα & κόστος
-      const kwhUnits = ethers.parseUnits(String(kwhInt), 0); // 0 γιατί ζητάμε ακέραιες kWh
-      const totalWei = kwhUnits * fixedPriceWei;             // BigInt
+      const kwhUnits = ethers.parseUnits(String(kwhInt), 0);
+      const totalWei = kwhUnits * fixedPriceWei;
 
       const tx = await tokenC.buyTokens({ value: totalWei });
-      // περίμενε 1 confirmation
       await provider.waitForTransaction(tx.hash, 1);
 
       setPrepaidKwhInput("");
       await refreshAll(account);
+      // ενημέρωσε Analytics
+      window.dispatchEvent(new CustomEvent("kwh:refresh-analytics"));
+
       setStatus("ΟΚ.");
     } catch (e) {
       console.error(e);
@@ -319,6 +311,9 @@ export default function DApp() {
       const tx = await tokenC.simulateConsumption();
       await provider.waitForTransaction(tx.hash, 1);
       await refreshAll(account);
+      // ενημέρωσε Analytics
+      window.dispatchEvent(new CustomEvent("kwh:refresh-analytics"));
+
       setStatus("Έγινε.");
     } catch (e) {
       console.error(e);
@@ -335,6 +330,9 @@ export default function DApp() {
       const tx = await tokenC.payBill({ value: pendingBillWei });
       await provider.waitForTransaction(tx.hash, 1);
       await refreshAll(account);
+      // ενημέρωσε Analytics
+      window.dispatchEvent(new CustomEvent("kwh:refresh-analytics"));
+
       setStatus("ΟΚ.");
     } catch (e) {
       console.error(e);
@@ -364,48 +362,48 @@ export default function DApp() {
   }
 
   return (
-    <div style={{ maxWidth: 960, margin: "32px auto", padding: "0 16px", fontFamily: "system-ui, Arial" }}>
-      {/* top nav */}
-      <div style={{ display: "flex", gap: 14, alignItems: "center", marginBottom: 8 }}>
-        <a href="/app" style={{ fontWeight: 700, textDecoration: "none" }}>DApp</a>
-        <a href="/analytics" style={{ textDecoration: "none" }}>Στατιστικά</a>
+    <div className="container grid">
+      {/* Κεφαλίδα σελίδας */}
+      <div className="grid card section" style={{ gap: 8 }}>
+        <h1 style={{ margin: 0 }}>KWHToken DApp</h1>
+        <p style={{ opacity: 0.8, margin: 0 }}>
+          Διαχείριση κατανάλωσης και πληρωμών σε PREPAID / PAYG, με προσομοίωση και αγορά kWh.
+        </p>
       </div>
 
-      <h1 style={{ fontSize: 42, margin: 0 }}>KWHToken DApp</h1>
-
-      <div style={{ marginTop: 12, lineHeight: 1.7 }}>
-        <div><strong>Λογαριασμός:</strong> {account || "—"}</div>
-        <div><strong>Chain:</strong> {chainId || "—"}</div>
-        <div><strong>Υπόλοιπο KWH:</strong> {kwhBalance}</div>
-        <div><strong>Τιμή (fixed) / kWh:</strong> {fixedPriceWei ? fmtETH(fixedPriceWei) : "—"}</div>
-        <div>
-          <strong>Τιμή (fluctuating) / kWh:</strong> {fluctPriceWei ? fmtETH(fluctPriceWei) : "—"}
-          {fluctSecondsLeft ? <span style={{ marginLeft: 8, opacity: 0.7 }}>({fluctSecondsLeft}s για αλλαγή)</span> : null}
+      {/* Πληροφορίες πορτοφολιού & τιμών */}
+      <div className="card section">
+        <div className="grid" style={{ gap: 8 }}>
+          <div><strong>Λογαριασμός:</strong> {account || "—"}</div>
+          <div><strong>Chain:</strong> {chainId || "—"}</div>
+          <div><strong>Υπόλοιπο KWH:</strong> {kwhBalance}</div>
+          <div><strong>Τιμή (fixed) / kWh:</strong> {fixedPriceWei ? fmtETH(fixedPriceWei) : "—"}</div>
+          <div>
+            <strong>Τιμή (fluctuating) / kWh:</strong> {fluctPriceWei ? fmtETH(fluctPriceWei) : "—"}
+            {fluctSecondsLeft ? (
+              <span style={{ marginLeft: 8, opacity: 0.7 }}>({fluctSecondsLeft}s για αλλαγή)</span>
+            ) : null}
+          </div>
+          <div style={{ opacity: 0.8 }}>
+            {fixedPriceWei && fluctuatingHint(fixedPriceWei, fluctuatingToBig(fluctPriceWei))}
+          </div>
         </div>
-        <div style={{ marginTop: 6, fontSize: 12, opacity: 0.8 }}>
-          {fixedPriceWei && fluctPriceWei
-            ? (BigInt(fluctPriceWei) > BigInt(fixedPriceWei)
-                ? "💡 Συμφέρει PREPAID αυτή τη στιγμή."
-                : "💡 Η PAYG (fluctuating) είναι φθηνότερη τώρα.")
-            : null}
-        </div>
 
-        <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
-          {!account && <button onClick={connectWallet}>Σύνδεση με MetaMask</button>}
-          <button onClick={addKwhToMetaMask}>Πρόσθεσε KWH στο MetaMask</button>
+        <div className="grid" style={{ gap: 8, marginTop: 12 }}>
+          {!account && <button className="btn" onClick={connectWallet}>Σύνδεση με MetaMask</button>}
+          <button className="btn ghost" onClick={addKwhToMetaMask}>Πρόσθεσε KWH στο MetaMask</button>
         </div>
       </div>
-
-      <hr style={{ margin: "24px 0" }} />
 
       {/* Επιλογή μοντέλου */}
-      <div style={{ marginBottom: 16 }}>
+      <div className="card section">
         <label htmlFor="billing-select"><strong>Μοντέλο χρέωσης:</strong>{" "}</label>
         <select
           id="billing-select"
+          className="input"
           value={billingModel === "unset" ? "prepaid" : billingModel}
           onChange={(e) => changeModel(e.target.value)}
-          style={{ padding: "6px 10px", fontSize: 14 }}
+          style={{ width: 220, marginLeft: 8 }}
         >
           <option value="prepaid">Prepaid</option>
           <option value="payg">Pay-As-You-Go</option>
@@ -417,31 +415,34 @@ export default function DApp() {
 
       {/* PREPAID */}
       {(billingModel === "prepaid" || billingModel === "unset") && (
-        <section style={{ padding: 16, border: "1px solid #eee", borderRadius: 8, marginBottom: 16 }}>
+        <section className="card section">
           <h3 style={{ marginTop: 0 }}>Prepaid</h3>
           <p style={{ marginTop: -6, opacity: 0.8 }}>
             Αγόρασε kWh προκαταβολικά. Κόστος = kWh × fixed price.
           </p>
-          <form onSubmit={handlePrepaidBuy} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-            <input
-              type="number"
-              min="0"
-              step="1"
-              placeholder="π.χ. 5"
-              value={prepaidKwhInput}
-              onChange={(e) => setPrepaidKwhInput(e.target.value)}
-              style={{ padding: "6px 10px", width: 140 }}
-            />
-            <span>kWh</span>
-            <button type="submit" disabled={!fixedPriceWei || !prepaidKwhInput}>Αγορά</button>
-            <span style={{ marginLeft: 12, opacity: 0.7, fontSize: 12 }}>
+
+          <form onSubmit={handlePrepaidBuy} className="grid" style={{ gap: 10 }}>
+            <div className="grid" style={{ gridTemplateColumns: "160px auto", gap: 10, alignItems: "center" }}>
+              <input
+                className="input"
+                type="number"
+                min="0"
+                step="1"
+                placeholder="π.χ. 5"
+                value={prepaidKwhInput}
+                onChange={(e) => setPrepaidKwhInput(e.target.value)}
+              />
+              <button type="submit" className="btn" disabled={!fixedPriceWei || !prepaidKwhInput}>
+                Αγορά
+              </button>
+            </div>
+            <span style={{ opacity: 0.7, fontSize: 12 }}>
               Τρέχον κόστος/kWh: {fixedPriceWei ? fmtETH(fixedPriceWei) : "—"}
             </span>
           </form>
 
-          {/* simulate + pay bill και στο PREPAID */}
-          <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 14, flexWrap: "wrap" }}>
-            <button onClick={handleSimulateConsumption}>Simulate Consumption</button>
+          <div className="grid" style={{ gap: 12, marginTop: 14 }}>
+            <button className="btn ghost" onClick={handleSimulateConsumption}>Simulate Consumption</button>
             <span style={{ opacity: 0.7, fontSize: 12 }}>
               Θα καούν διαθέσιμα KWH. Αν δεν φτάνουν, το υπόλοιπο χρεώνεται στο pending bill με fixed τιμή.
             </span>
@@ -450,9 +451,10 @@ export default function DApp() {
           <div style={{ marginTop: 10 }}>
             <div><strong>Pending bill (KWHToken):</strong> {fmtETH(pendingBillWei)}</div>
             <button
+              className="btn"
               onClick={handlePayBill}
               disabled={!pendingBillWei || pendingBillWei === "0"}
-              style={{ marginTop: 6 }}
+              style={{ marginTop: 8 }}
             >
               Pay Bill
             </button>
@@ -462,14 +464,14 @@ export default function DApp() {
 
       {/* PAYG */}
       {billingModel === "payg" && (
-        <section style={{ padding: 16, border: "1px solid #eee", borderRadius: 8 }}>
+        <section className="card section">
           <h3 style={{ marginTop: 0 }}>Pay-As-You-Go (προσομοίωση)</h3>
           <p style={{ marginTop: -6, opacity: 0.8 }}>
             Προσομοίωσε κατανάλωση μέσω του Token και πλήρωσε τον εκκρεμή λογαριασμό.
           </p>
 
-          <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 10 }}>
-            <button onClick={handleSimulateConsumption}>Simulate Consumption</button>
+          <div className="grid" style={{ gap: 12, marginBottom: 10 }}>
+            <button className="btn ghost" onClick={handleSimulateConsumption}>Simulate Consumption</button>
           </div>
 
           <div style={{ marginTop: 6 }}>
@@ -478,7 +480,7 @@ export default function DApp() {
           </div>
 
           <div style={{ marginTop: 10 }}>
-            <button onClick={handlePayBill} disabled={!pendingBillWei || pendingBillWei === "0"}>
+            <button className="btn" onClick={handlePayBill} disabled={!pendingBillWei || pendingBillWei === "0"}>
               Pay Bill
             </button>
           </div>
@@ -486,22 +488,49 @@ export default function DApp() {
       )}
 
       {/* P2P Marketplace */}
-      <hr style={{ margin: "24px 0" }} />
-      <Marketplace
-        account={account}
-        provider={provider}
-        token={tokenC}
-        tokenAddress={KWHTokenAddress}
-        tokenAbi={KWHTokenABI}
-        tokenDecimals={kwhDecimals}
-        balanceUnits={kwhBalanceUnits}
-        onRefresh={() => refreshAll(account)}
-      />
+      <section className="card section">
+        <h3 style={{ marginTop: 0 }}>P2P Marketplace</h3>
+        <Marketplace
+          account={account}
+          provider={provider}
+          token={tokenC}
+          tokenAddress={KWHTokenAddress}
+          tokenAbi={KWHTokenABI}
+          tokenDecimals={kwhDecimals}
+          balanceUnits={kwhBalanceUnits}
+          onRefresh={() => refreshAll(account)}
+        />
+      </section>
 
       {/* Tx feed από backend */}
-      <TxFeed />
+      <section className="card section">
+        <h3 style={{ marginTop: 0 }}>Transactions Feed</h3>
+        <TxFeed />
+      </section>
 
-      <div style={{ marginTop: 18, color: "#444" }}>{status}</div>
+      {/* Κατάσταση */}
+      {!!status && (
+        <div className="card section" style={{ color: "#cfcfd6" }}>
+          {status}
+        </div>
+      )}
     </div>
   );
+}
+
+/* ===== Helpers μόνο για rendering hints ===== */
+function fluctuatingToBig(v){
+  try { return BigInt(v); } catch { return 0n; }
+}
+function fluctuatingHint(fixed, fluctuating){
+  try{
+    const fx = BigInt(fixed ?? 0);
+    const fl = BigInt(fluctuating ?? 0);
+    if (fx === 0n || fl === 0n) return null;
+    return fl > fx
+      ? "💡 Συμφέρει PREPAID αυτή τη στιγμή."
+      : "💡 Η PAYG (fluctuating) είναι φθηνότερη τώρα.";
+  }catch{
+    return null;
+  }
 }

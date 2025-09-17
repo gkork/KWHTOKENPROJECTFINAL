@@ -4,7 +4,6 @@ const DEFAULT_BASE = "http://localhost:4000";
 function computeBase() {
   const raw = (process.env.REACT_APP_API_BASE || "").trim();
   if (raw && raw !== "/") return raw.replace(/\/$/, "");
-  // dev fallback: αν τρέχεις στο :3000, πήγαινε στο :4000
   if (typeof window !== "undefined") {
     const { protocol, hostname, port } = window.location;
     if (port === "3000") return `${protocol}//${hostname}:4000`;
@@ -30,16 +29,24 @@ function authHeaders() {
   return t ? { Authorization: `Bearer ${t}` } : {};
 }
 
+function withTs(url) {
+  return `${url}${url.includes("?") ? "&" : "?"}t=${Date.now()}`;
+}
+
 async function jsonFetch(path, opts = {}) {
-  const url = `${API_BASE}${path.startsWith("/") ? path : "/" + path}`;
+  const urlBase = `${API_BASE}${path.startsWith("/") ? path : "/" + path}`;
+  const url = withTs(urlBase);
   const res = await fetch(url, {
+    cache: "no-store",
+    credentials: "include",
     ...opts,
     headers: {
       "Content-Type": "application/json",
+      "Cache-Control": "no-cache",
+      Pragma: "no-cache",
       ...authHeaders(),
       ...(opts.headers || {}),
     },
-    credentials: "include",
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
@@ -49,22 +56,23 @@ async function jsonFetch(path, opts = {}) {
 }
 
 export async function getSummary(userAddress) {
-  return jsonFetch(`/api/analytics/summary?user=${encodeURIComponent(userAddress)}`);
+  const q = userAddress ? `?user=${encodeURIComponent(userAddress)}` : "";
+  return jsonFetch(`/api/analytics/summary${q}`);
 }
+
 export async function getDaily(userAddress) {
   const q = userAddress ? `?user=${encodeURIComponent(userAddress)}` : "";
   const data = await jsonFetch(`/api/analytics/daily${q}`);
-  // επιστρέφουμε ΠΑΝΤΑ array, αλλιώς []
-  return Array.isArray(data?.daily) ? data.daily : [];
+  return Array.isArray(data?.daily) ? data.daily : Array.isArray(data) ? data : [];
 }
 
-
-// SSE
+// SSE (live)
 export function openLiveSession(userAddress, onMessage, onError) {
   const token = getToken();
   const qs = new URLSearchParams({
-    user: userAddress || "",
+    ...(userAddress ? { user: userAddress } : {}),
     ...(token ? { token } : {}),
+    t: String(Date.now()), // avoid caches/proxies
   }).toString();
 
   const es = new EventSource(`${API_BASE}/api/analytics/sessions?${qs}`, {
@@ -79,19 +87,19 @@ export function openLiveSession(userAddress, onMessage, onError) {
   return es;
 }
 
-// JSON list of recent sessions (όχι SSE)
+// JSON list of recent sessions
 export async function getSessions(userAddress, limit = 20) {
   const qs = new URLSearchParams({
-    user: userAddress || "",
+    ...(userAddress ? { user: userAddress } : {}),
     limit: String(limit),
+    t: String(Date.now()),
   }).toString();
 
   const data = await jsonFetch(`/api/analytics/sessions?${qs}`);
   return Array.isArray(data?.sessions) ? data.sessions : [];
 }
 
-// Live updates (SSE) – ίδιο όπως πριν
+// alias
 export function openSSE(userAddress, onMessage, onError) {
   return openLiveSession(userAddress, onMessage, onError);
 }
-
