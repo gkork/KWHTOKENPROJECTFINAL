@@ -7,7 +7,6 @@ export default function Signup() {
   const navigate = useNavigate();
   const location = useLocation();
 
-  // Αν ήρθες εδώ επειδή πήγες σε protected route, κράτα τον προορισμό
   const from = location.state?.from?.pathname || "/app";
 
   const [email, setEmail] = useState("");
@@ -21,7 +20,7 @@ export default function Signup() {
     setLoading(true);
     try {
       await register(email, password);
-      // Επιστροφή στον αρχικό προορισμό (π.χ. /analytics)
+      
       navigate(from, { replace: true });
     } catch (e) {
       setErr(e?.message || "Αποτυχία εγγραφής");

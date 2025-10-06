@@ -21,7 +21,7 @@ export default function Login() {
     setLoading(true);
     try {
       await login(email, password);
-      // ➜ ΕΠΙΣΤΡΟΦΗ εκεί που πήγαινες (π.χ. /analytics)
+      
       navigate(from, { replace: true });
     } catch (e) {
       setErr(e?.message || "Αποτυχία σύνδεσης");

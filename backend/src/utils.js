@@ -5,7 +5,7 @@ import { RPC_URL } from "./config.js";
 /* ---------------- RPC provider & helpers ---------------- */
 
 // Αν υπάρχει RPC_WS_URL χρησιμοποίησε WebSocket (πιο άμεσο για events).
-// Αλλιώς γύρνα σε HTTP με ενεργό polling.
+// Αλλιώς γύρνα σε HTTP με ενεργό polling σε περίπτωση που δεν λειτουργεί το WebSocket (π.χ λόγω firewall) .
 function makeProvider() {
   const ws = (process.env.RPC_WS_URL || "").trim();
   const pollMs = Number(process.env.POLL_MS || 5000);
@@ -18,7 +18,7 @@ function makeProvider() {
     return p;
   }
 
-  const http = RPC_URL || "http://127.0.0.1:8545";
+  const http = RPC_URL || "http://127.0.0.1:8545";      // Αν δεν έχει δοθεί RPC_URL, πέφτουμε σε τοπικό default
   if (!RPC_URL) {
     console.warn(`[utils] RPC_URL is empty; falling back to ${http}`);
   }
@@ -31,14 +31,16 @@ function makeProvider() {
 
 export const provider = makeProvider();
 
-// Μικρό delay helper για retries
+// Μικρό delay helper για retries σε αποτυχημένες κλήσεις
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const blockTimeCache = new Map();
+const blockTimeCache = new Map();   // Cache για χρόνους blocks: αποφεύγουμε να ρωτάμε ξανά τον κόμβο για τα ίδια blocks
 
 /**
- * Πάρε timestamp block με μικρή cache και retries (ethers v6 μπορεί να γυρίσει null σε race conditions)
- * @returns {number|null} unix seconds ή null αν δεν βρέθηκε
+ *  Επιστρέφει το timestamp ενός block (σε UNIX seconds).
+ * - Δοκιμάζει έως 3 φορές (μικρά retries) γιατί μερικές φορές ο κόμβος αργεί/επιστρέφει null.
+ * - Χρησιμοποιεί μικρή cache για να μειώσει περιττές κλήσεις. 
+   @returns {number|null} 
  */
 export async function getBlockTs(blockNumber) {
   if (blockTimeCache.has(blockNumber)) return blockTimeCache.get(blockNumber);
@@ -54,17 +56,17 @@ export async function getBlockTs(blockNumber) {
       }
     } catch {}
     attempt += 1;
-    await sleep(200 * attempt); // 200ms, 400ms, 600ms
+    await sleep(200 * attempt); // προοδευτικές καθυστερήσεις: 200ms, 400ms, 600ms
   }
   return null;
 }
 
 /**
- * Ασφαλές receipt getter που δουλεύει είτε δώσεις event (ethers v6) είτε hash
- * - Αν το event έχει getTransactionReceipt(), το χρησιμοποιούμε (πιο αξιόπιστο).
- * - Αλλιώς προσπαθούμε από transactionHash/hash.
- * @param {any} evOrHash
- * @returns {Promise<import('ethers').TransactionReceipt|null>}
+ * Ασφαλές receipt getter που δουλεύει είτε δώσεις event είτε hash
+ * - Αν το event έχει getTransactionReceipt(), το χρησιμοποιούμε .
+ * - Αλλιώς προσπαθούμε από transactionHash/hash. 
+  @param {any} evOrHash
+  @returns {Promise<import('ethers').TransactionReceipt|null>}
  */
 export async function getReceiptSafe(evOrHash) {
   try {
@@ -85,13 +87,13 @@ export async function getReceiptSafe(evOrHash) {
 }
 
 // Βοηθητικά ids/keys
-export const toId    = (txHash, logIndex) => `${txHash}_${logIndex}`;
-export const dayKey  = (ts) => Math.floor(ts / 86400);
-export const toLower = (x) => (typeof x === "string" ? x.toLowerCase() : x);
+export const toId    = (txHash, logIndex) => `${txHash}_${logIndex}`;   // μοναδικό ID για log εγγραφή
+export const dayKey  = (ts) => Math.floor(ts / 86400);                // «κλειδί ημέρας» (UTC) από seconds
+export const toLower = (x) => (typeof x === "string" ? x.toLowerCase() : x);    // ασφαλές Μετατροπη απο κεφαλαία σε πεζά
 
 /* ---------------- ABI helpers ---------------- */
 
-// Επιστρέφει πάντα array (είτε είναι artifact {abi:[]} είτε σκέτο [])
+// Επιστρέφει πάντα array (είτε {abi:[]} είτε σκέτο [])
 export function normalizeABI(x) {
   if (!x) return [];
   if (Array.isArray(x)) return x;
@@ -99,7 +101,7 @@ export function normalizeABI(x) {
   return [];
 }
 
-export function mergeAbis(...abix) {
+export function mergeAbis(...abix) {     // Συγχώνευση πολλών ABIs (μόνο functions/events) σε ένα ενιαίο Interface για parsing
   const frags = [];
   for (const raw of abix) {
     const abi = normalizeABI(raw);
@@ -111,7 +113,11 @@ export function mergeAbis(...abix) {
 }
 
 /**
- * Καθαρισμός args/logs για αποθήκευση (BigInt → string, αφαίρεση numeric aliases)
+
+ * «Καθαρίζει» αντικείμενα args/logs πριν τα γράψουμε στη βάση:
+ * - Μετατροπή μορφής BigInt σε string (ώστε να είναι σε JSON-κατανοητή μορφή)
+ * - Αφαιρεί τους αριθμούς που προσθέτει το ethers (π.χ. "0", "1" σε array-like)
+ 
  */
 export function serializeArgs(obj) {
   if (obj == null) return obj;
@@ -120,7 +126,7 @@ export function serializeArgs(obj) {
   if (typeof obj === "object") {
     const out = {};
     for (const [k, v] of Object.entries(obj)) {
-      if (/^\d+$/.test(k)) continue; // skip numeric aliases (ethers array-like)
+      if (/^\d+$/.test(k)) continue; 
       out[k] = serializeArgs(v);
     }
     return out;

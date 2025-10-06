@@ -6,12 +6,16 @@ import "../App.css";
 
 // Components
 import Marketplace from "../components/Marketplace";
+
 import TxFeed from "../components/TxFeed";
 
 // Διευθύνσεις & debug
 import {
+
   KWHTokenAddress,
   EnergyBillingAddress,
+
+
   printEnvDebug,
 } from "../config";
 
@@ -20,6 +24,7 @@ import KWHTokenBuild from "../abi/KWHTokenABI.json";
 import EnergyBillingBuild from "../abi/EnergyBillingABI.json";
 
 const KWHTokenABI = KWHTokenBuild.abi ?? KWHTokenBuild;
+
 const EnergyBillingABI = EnergyBillingBuild.abi ?? EnergyBillingBuild;
 
 const BILL_PM = { UNSET: 0, PREPAID: 1, PAYG: 2 };
@@ -31,8 +36,10 @@ const fromBillEnum = (n) =>
   n === BILL_PM.PAYG ? "payg" : n === BILL_PM.PREPAID ? "prepaid" : "unset";
 
 export default function DApp() {
+
   // Wallet / network
   const [account, setAccount] = useState("");
+
   const [chainId, setChainId] = useState("");
 
   // Contracts
@@ -48,6 +55,7 @@ export default function DApp() {
   const [kwhBalanceUnits, setKwhBalanceUnits] = useState(0n); // raw BigInt balance
 
   // Billing state
+
   const [billingModel, setBillingModel] = useState("unset");
   const [pendingBillWei, setPendingBillWei] = useState("0");
   const [pendingConsumption, setPendingConsumption] = useState("0");
@@ -224,7 +232,6 @@ export default function DApp() {
       });
     }, 1000);
     return () => clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [account, tokenC, billingC]);
 
   // Αλλαγή μοντέλου
@@ -243,22 +250,26 @@ export default function DApp() {
 
       if (currentEnum === BILL_PM.UNSET) {
         const tx = await billingC.setModel(nextBillEnum);
-        await tx.wait();
+        const rcpt = await provider.waitForTransaction(tx.hash, 1); // ⬅ added
+        window.dispatchEvent(new CustomEvent("kwh:refresh-analytics")); // ⬅ added
       } else {
         const tx = await billingC.changeModel(nextBillEnum);
-        await tx.wait();
+        const rcpt = await provider.waitForTransaction(tx.hash, 1); // ⬅ added
+        window.dispatchEvent(new CustomEvent("kwh:refresh-analytics")); // ⬅ added
       }
 
       try {
         if (tokenC) {
           const tokenEnum = toTokenEnum(nextStr);
           const tx2 = await tokenC.registerUser(tokenEnum);
-          await tx2.wait();
+          const rcpt2 = await provider.waitForTransaction(tx2.hash, 1); // ⬅ added
+          window.dispatchEvent(new CustomEvent("kwh:refresh-analytics")); // ⬅ added
         }
       } catch (_) {}
 
       await refreshAll(account);
       setStatus("Έγινε.");
+      window.dispatchEvent(new CustomEvent("kwh:refresh-analytics")); // ⬅ added (τελικό σήμα)
     } catch (e) {
       console.error(e);
       const msg = String(e?.message || "").toLowerCase();
@@ -367,7 +378,7 @@ export default function DApp() {
       <div className="grid card section" style={{ gap: 8 }}>
         <h1 style={{ margin: 0 }}>KWHToken DApp</h1>
         <p style={{ opacity: 0.8, margin: 0 }}>
-          Διαχείριση κατανάλωσης και πληρωμών σε PREPAID / PAYG, με προσομοίωση και αγορά kWh.
+          Διαχείριση κατανάλωσης και πληρωμών με προπληρωμή kWh  (Prepaid) ή Χρέωση κατά κατανάλωση  kWh (PAYG).
         </p>
       </div>
 
@@ -475,7 +486,7 @@ export default function DApp() {
           </div>
 
           <div style={{ marginTop: 6 }}>
-            <div><strong>Pending consumption (EnergyBilling):</strong> {pendingConsumption} kWh</div>
+            {/* <div><strong>Pending consumption (EnergyBilling):</strong> {pendingConsumption} kWh</div> */}
             <div><strong>Pending bill (KWHToken):</strong> {fmtETH(pendingBillWei)}</div>
           </div>
 
@@ -518,7 +529,6 @@ export default function DApp() {
   );
 }
 
-/* ===== Helpers μόνο για rendering hints ===== */
 function fluctuatingToBig(v){
   try { return BigInt(v); } catch { return 0n; }
 }

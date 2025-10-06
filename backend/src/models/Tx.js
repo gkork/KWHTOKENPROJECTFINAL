@@ -3,35 +3,35 @@ import mongoose from "mongoose";
 
 const TxSchema = new mongoose.Schema(
   {
-    chainId: { type: Number, index: true },
-    blockNumber: { type: Number, index: true },
-    blockHash: String,
+    chainId: { type: Number, index: true }, // Δίκτυο EVM
+    blockNumber: { type: Number, index: true },  // Σε ποιο block καταγράφηκε
+    blockHash: String,  // Hash του block
 
-    // ΜΗΝ κάνεις single-field index εδώ — καλύπτεται από το σύνθετο
-    txHash: { type: String, required: true },
-    logIndex: { type: Number, default: -1 }, // -1 για συναλλαγή χωρίς συγκεκριμένο log
+    
+    txHash: { type: String, required: true },   // Hash συναλλαγής
+    logIndex: { type: Number, default: -1 }, // Θέση log στο tx (ή -1 αν δεν συνδέεται με συγκεκριμένο log) 
 
-    contract: { type: String, index: true }, // address (lowercased)
-    event: { type: String, index: true },    // π.χ. "Listed"
+    contract: { type: String, index: true }, // Διεύθυνση συμβολαίου
+    event: { type: String, index: true },    // Όνομα event (π.χ. "Listed", "Purchased")
     args: { type: Object },                  // καθαρισμένα args (BigInt -> string)
 
-    from: String,
-    to: String,
-    value: String,                           // wei (string)
+    from: String,           // Αποστολέας (διεύθυνση, θα γίνει lower-case στο hook)
+    to: String,             // Παραλήπτης (διεύθυνση)
+    value: String,          // Ποσό σε wei (ως string για να μη χάνεται ακρίβεια
 
-    status: { type: String, default: "confirmed" },
-    meta: { type: Object },
+    status: { type: String, default: "confirmed" },    // Κατάσταση καταχώρισης (π.χ. "confirmed")
+    meta: { type: Object },            // Πρόσθετα μεταδεδομένα
   },
   { timestamps: true, versionKey: false }
 );
 
-// μοναδικό ανά (txHash, logIndex)
+// Μοναδικό ανά (txHash, logIndex) για να αποτραπούν σε διπλοεγγραφές του ίδιου log
 TxSchema.index({ txHash: 1, logIndex: 1 }, { unique: true, name: "txLog_unique" });
 
-// χρήσιμο για αναζητήσεις feed
+// Γρήγορες αναζητήσεις για feed: ανά συμβόλαιο/event, ταξινομημένο απο τα νεότερα πρώτα
 TxSchema.index({ contract: 1, event: 1, blockNumber: -1 });
 
-// προαιρετικό: κράτα τα address σε lower-case
+// Κράτα τα address σε lower-case
 TxSchema.pre("save", function (next) {
   try {
     if (this.contract) this.contract = String(this.contract).toLowerCase();

@@ -10,61 +10,115 @@ export default function TxFeed() {
   const [limit, setLimit] = useState(50);
   const [autoRefresh, setAutoRefresh] = useState(false);
 
-  const [list, setList] = useState([]);        // ΠΑΝΤΑ array
+  const [list, setList] = useState([]);        // πάντα array
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
 
   const timerRef = useRef(null);
 
+  // ---- helpers ----
+  const fmtTs = (ms) => {
+    if (!ms || Number.isNaN(ms)) return "—";
+    try {
+      return new Intl.DateTimeFormat("el-GR", {
+        dateStyle: "short",
+        timeStyle: "medium",
+        timeZone: "Europe/Athens",
+      }).format(new Date(ms));
+    } catch {
+      return "—";
+    }
+  };
+  const short = (s, head = 10, tail = 6) =>
+    s && s.length > head + tail ? `${s.slice(0, head)}…${s.slice(-tail)}` : (s || "—");
+
+  // Ενοποίηση πεδίων από διαφορετικά endpoints/schemas
+  function normalizeRows(raw = []) {
+    return raw.map((r) => {
+      const ts = r.ts ?? r.blockTime ?? r.time ?? r.timestamp ?? null;
+      let timeMs = null;
+      try {
+        // Date/ISO/string/number → ms
+        timeMs = ts instanceof Date ? ts.getTime() : ts != null ? new Date(ts).getTime() : null;
+        if (Number.isNaN(timeMs)) timeMs = null;
+      } catch {
+        timeMs = null;
+      }
+      return {
+        time: timeMs,                                                  // ms
+        blockNumber: r.blockNumber ?? null,
+        event: r.name || r.event || r.type || "—",
+        address: (r.contract || r.address || "").toLowerCase(),
+        txHash: r.txHash || r.hash || "",
+        args: r.args || r.payload || {},
+      };
+    });
+  }
+
+  async function fetchEventsEndpoint() {
+    // Προσπάθεια στο /api/events
+    // (κρατάμε μόνο limit — τα υπόλοιπα φίλτρα τα κάνουμε client-side για συμβατότητα)
+    const p = new URL(`${API_BASE}/api/events`);
+    p.searchParams.set("limit", String(limit || 50));
+    const resp = await fetch(p.toString(), { credentials: "include" });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status} @ /api/events`);
+    let data = {};
+    try { data = await resp.json(); } catch { data = {}; }
+    const rows = Array.isArray(data) ? data : Array.isArray(data.items) ? data.items : [];
+    return normalizeRows(rows);
+  }
+
+  async function fetchTxsEndpoint() {
+    // Fallback στο υπάρχον /chain/txs με server-side φίλτρα
+    const p = new URL(`${API_BASE}/chain/txs`);
+    p.searchParams.set("limit", String(limit || 50));
+    if (eventName.trim()) p.searchParams.set("event", eventName.trim());
+    if (address.trim())   p.searchParams.set("address", address.trim());
+    const resp = await fetch(p.toString(), { credentials: "include" });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status} @ /chain/txs`);
+    let data = {};
+    try { data = await resp.json(); } catch { data = {}; }
+    const rows = Array.isArray(data.items) ? data.items : Array.isArray(data) ? data : [];
+    return normalizeRows(rows);
+  }
+
   async function load() {
     setLoading(true);
     setErr("");
     try {
-      const p = new URL(`${API_BASE}/chain/txs`);
-      p.searchParams.set("limit", String(limit || 50));
-      if (eventName.trim()) p.searchParams.set("event", eventName.trim());
-      if (address.trim())   p.searchParams.set("address", address.trim());
-
-      const resp = await fetch(p.toString(), { credentials: "include" });
-      if (!resp.ok) {
-        setErr(`HTTP ${resp.status}`);
-        setList([]); // ασφαλές fallback
-        setLoading(false);
-        return;
+      // 1) /api/events
+      let rows = await fetchEventsEndpoint();
+      // client-side φίλτρο (σε περίπτωση που /api/events δεν υποστηρίζει params)
+      if (eventName.trim()) {
+        const q = eventName.trim().toLowerCase();
+        rows = rows.filter((r) => r.event.toLowerCase().includes(q));
       }
-
-      // Μπορεί να γυρίσει κενό σώμα/λάθος JSON → προστάτεψέ το
-      let data = {};
+      if (address.trim()) {
+        const a = address.trim().toLowerCase();
+        rows = rows.filter((r) => r.address === a);
+      }
+      setList(rows);
+    } catch {
       try {
-        data = await resp.json();
-      } catch {
-        data = {};
+        // 2) fallback: /chain/txs (όπως είχες)
+        const rows = await fetchTxsEndpoint();
+        setList(rows);
+      } catch (e2) {
+        setErr(String(e2?.message || e2));
+        setList([]);
       }
-
-      // Αποδέξου items ΜΟΝΟ αν είναι array
-      const items = Array.isArray(data.items)
-        ? data.items
-        : Array.isArray(data)
-        ? data
-        : [];
-
-      setList(items);
-    } catch (e) {
-      setErr(String(e?.message || e));
-      setList([]);
     } finally {
       setLoading(false);
     }
   }
 
-  // Αρχικό load μόνο μία φορά
+  // Αρχικό load
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Auto refresh με σταθερό dependency array για να μη βγάζει
-  // "The final argument passed to useEffect changed size..."
+  // Auto refresh on/off
   useEffect(() => {
     if (autoRefresh) {
       timerRef.current = setInterval(load, 5000);
@@ -74,24 +128,28 @@ export default function TxFeed() {
       timerRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoRefresh]);
+  }, [autoRefresh, limit, eventName, address]);
 
-  const fmtTs = (ms) => {
-    if (!ms || Number.isNaN(ms)) return "—";
-    try { return new Date(ms).toLocaleString(); } catch { return "—"; }
-  };
+  // Refresh όταν γίνονται simulate/buy/pay (εκπέμπεις ήδη αυτό το event στο DApp)
+  useEffect(() => {
+    const cb = () => load();
+    window.addEventListener("kwh:refresh-analytics", cb);
+    return () => window.removeEventListener("kwh:refresh-analytics", cb);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
-    <section style={{ padding: 16, border: "1px solid #eee", borderRadius: 8, marginTop: 24 }}>
+    <section className="card section" style={{ marginTop: 24 }}>
       <h3 style={{ marginTop: 0 }}>On-chain συναλλαγές / events</h3>
 
       <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
         <label>
           Event:&nbsp;
           <input
+            className="input"
             value={eventName}
             onChange={(e) => setEventName(e.target.value)}
-            placeholder="π.χ. Listed, Purchased…"
+            placeholder="π.χ. Listed, Purchased, Simulated…"
             style={{ width: 240 }}
           />
         </label>
@@ -99,6 +157,7 @@ export default function TxFeed() {
         <label>
           Contract:&nbsp;
           <input
+            className="input"
             value={address}
             onChange={(e) => setAddress(e.target.value)}
             placeholder="0x… (προαιρετικό)"
@@ -108,14 +167,14 @@ export default function TxFeed() {
 
         <label>
           Limit:&nbsp;
-          <select value={limit} onChange={(e) => setLimit(Number(e.target.value))}>
+          <select className="input" value={limit} onChange={(e) => setLimit(Number(e.target.value))} style={{ width: 100 }}>
             {[25, 50, 100, 200, 500].map((n) => (
               <option key={n} value={n}>{n}</option>
             ))}
           </select>
         </label>
 
-        <button onClick={load} disabled={loading}>
+        <button className="btn" onClick={load} disabled={loading}>
           {loading ? "Φόρτωση…" : "Ανανέωση"}
         </button>
 
@@ -149,8 +208,8 @@ export default function TxFeed() {
                 <td>{fmtTs(it.time)}</td>
                 <td>{it.blockNumber ?? "—"}</td>
                 <td>{it.event || "—"}</td>
-                <td title={it.address}>{it.address ? `${it.address.slice(0, 6)}…${it.address.slice(-4)}` : "—"}</td>
-                <td title={it.txHash}>{it.txHash ? `${it.txHash.slice(0, 10)}…${it.txHash.slice(-6)}` : "—"}</td>
+                <td title={it.address}>{it.address ? short(it.address, 6, 4) : "—"}</td>
+                <td title={it.txHash}>{short(it.txHash)}</td>
                 <td>
                   <code style={{ fontSize: 12 }}>
                     {it.args ? JSON.stringify(it.args) : "{}"}

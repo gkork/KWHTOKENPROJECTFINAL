@@ -1,83 +1,73 @@
 // src/pages/Analytics.js
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { ethers } from "ethers";
-import { getSummary, getDaily } from "../api/analyticsApi";
+import { getSummary, getDaily, openLiveSession } from "../api/analyticsApi";
 
-/* ===== helpers ===== */
-const DEV = process.env.NODE_ENV !== "production";
+// Αν το API δεν επιστρέψει σωστό pendingBill, το διαβάζουμε απευθείας από το συμβόλαιο.
+import { KWHTokenAddress } from "../config";
+import KWHTokenBuild from "../abi/KWHTokenABI.json";
+const KWHTokenABI = KWHTokenBuild.abi ?? KWHTokenBuild;
+
+// Μετατρέπει οτιδήποτε σε Number με ασφάλεια. Αν αποτύχει, γυρίζει 0.
 const asNum = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
-const fmtETH = (v) => { try { return `${ethers.formatEther(v ?? "0")} ETH`; } catch { return `${v ?? 0} ETH`; } };
-const pad2 = (n) => String(n).padStart(2, "0");
 
-/** yyyy-mm-dd (LOCAL) */
-function localKey(d) {
+// Μορφοποιεί ποσό wei σε ETH (string).
+const fmtETH = (v) => { try { return `${ethers.formatEther(v ?? "0")} ETH`; } catch { return `${v ?? 0} ETH`; } };
+
+// Απλή συμπλήρωση αριστερά με μηδενικά (π.χ. 5 → "05")
+const pad2 = (n) => String(n).padStart(2, "0");
+// Παράγει κλειδί ημερομηνίας σε LOCAL ζώνη ώρας (yyyy-mm-dd)
+const localKey = (d) => {
   const dt = d instanceof Date ? d : new Date(d);
   return `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}`;
-}
-/** yyyy-mm-dd (UTC) */
-function utcKey(d) {
-  const dt = d instanceof Date ? d : new Date(d);
-  return dt.toISOString().slice(0, 10);
-}
+};
 
-/**
- * Κανονικοποίηση daily:
- * - ΠΑΝΤΑ συνεχές εύρος τελευταίων `days` ημερών (inclusive “σήμερα”).
- * - Γεμίζει όσα λείπουν με 0 ώστε να φαίνεται πάντα η σημερινή ημέρα.
- */
-function normalizeDaily(raw, { days = 30, mode = "local" } = {}) {
-  const keyFn = mode === "local" ? localKey : utcKey;
-
+/* Κανονικοποίηση daily: 30 μέρες (LOCAL), γέμισμα κενών με 0 */
+function normalizeDaily(raw, days = 30) {
   const map = new Map();
   (Array.isArray(raw) ? raw : []).forEach((row) => {
-    let key =
-      row.day ??
-      row.day_key ??
-      (row.date ? String(row.date).slice(0, 10) : null) ??
-      (row.ts ? keyFn(new Date(row.ts)) : null);
-    if (!key) return;
-    if (/\d{4}-\d{2}-\d{2}T/.test(key)) key = keyFn(new Date(key)); // normalize αν έχει ώρα
-
+    let s = row.day ?? row.day_key ?? (row.date ? String(row.date) : null) ?? null;
+    let dt = row.ts ? new Date(row.ts) : (s ? new Date(s) : null);
+    if (!dt || Number.isNaN(dt.getTime())) return;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s || "")) {
+      const [Y, M, D] = s.split("-").map(Number);
+      dt = new Date(Y, (M || 1) - 1, D || 1, 0, 0, 0, 0); // LOCAL midnight
+    }
+    const key = localKey(dt);
+    const prepaid = asNum(row.kwh_prepaid ?? row.prepaidKwh ?? row.prepaid);
+    const payg    = asNum(row.kwh_payg    ?? row.paygKwh    ?? row.payg);
+    // Άθροιση ανά ημέρα (αν υπάρχουν πολλαπλά rows για την ίδια ημέρα)
     const prev = map.get(key) || { prepaid: 0, payg: 0 };
-    const prepaid = asNum(row.prepaid ?? row.kwh_prepaid);
-    const payg = asNum(row.payg ?? row.kwh_payg);
     map.set(key, { prepaid: prev.prepaid + prepaid, payg: prev.payg + payg });
   });
 
   const out = [];
   for (let i = days - 1; i >= 0; i--) {
-    const d = new Date();
-    if (mode === "local") d.setDate(d.getDate() - i);
-    else d.setUTCDate(d.getUTCDate() - i);
-    const key = keyFn(d);
+    const d = new Date(); d.setDate(d.getDate() - i);
+    const key = localKey(d);
     const vals = map.get(key) || { prepaid: 0, payg: 0 };
     out.push({ day: key, kwh_prepaid: vals.prepaid, kwh_payg: vals.payg });
   }
   return out;
 }
 
-/* ===== mini stacked bar chart (SVG) ===== */
+/* Μικρό stacked chart (SVG) + HOVER TOOLTIP */
 function MiniBars({ data }) {
   const width = 900, height = 260, pad = 24, gap = 4;
-
-  const fmt = (v) => {
-    const n = Number(v) || 0;
-    return Math.abs(n) >= 10 ? Math.round(n).toString() : n.toFixed(1);
-  };
+  const containerRef = useRef(null);
+  const [tip, setTip] = useState({ show: false, x: 0, y: 0, day: "", prepaid: 0, payg: 0 });
 
   const bars = useMemo(() => {
     const arr = Array.isArray(data) ? data : [];
     if (!arr.length) return [];
-
     const totals = arr.map((d) => asNum(d.kwh_prepaid) + asNum(d.kwh_payg));
-    const max = Math.max(1, ...(totals.length ? totals : [0]));
+    const max = Math.max(1, ...totals);
     const innerH = height - pad * 2;
     const innerW = width - pad * 2;
     const bw = Math.max(6, Math.floor(innerW / Math.max(1, arr.length)) - gap);
 
     return arr.map((d, i) => {
-      const prepaid = asNum(d.kwh_prepaid);
-      const payg = asNum(d.kwh_payg);
+      const prepaid = asNum(d.kwh_prepaid), payg = asNum(d.kwh_payg);
       const total = prepaid + payg;
       const hP = (prepaid / max) * innerH;
       const hY = (payg / max) * innerH;
@@ -85,42 +75,92 @@ function MiniBars({ data }) {
       const yP = height - pad - hP;
       const yY = yP - hY;
       return {
-        x, bw, hP, hY, yP, yY, total,
-        prepaid, payg,
-        day: d.day,
-        label: String(d.day).slice(5), // MM-DD
+        x, bw, yP, yY, hP, hY, total,
+        day: d.day, prepaid, payg,
+        label: String(d.day).slice(5),
         isLast: i === arr.length - 1,
       };
     });
   }, [data]);
 
   const axisY = height - pad;
-  const hasAny = bars.some((b) => (b.total || 0) > 0);
+
+  const showTip = (evt, payload) => {
+    const host = containerRef.current;
+    if (!host) return;
+    const rect = host.getBoundingClientRect();
+    setTip({
+      show: true,
+      x: evt.clientX - rect.left + 12, // λίγο δεξιά από το ποντίκι
+      y: evt.clientY - rect.top - 8,   // λίγο πάνω
+      ...payload,
+    });
+  };
+
+  const hideTip = () => setTip((t) => ({ ...t, show: false }));
 
   return (
-    <div>
-      {!hasAny && (
-        <div style={{ opacity: 0.7, padding: "6px 0 8px" }}>
-          Δεν υπάρχουν δεδομένα για τις τελευταίες 30 ημέρες.
+    <div ref={containerRef} style={{ position: "relative" }} onMouseLeave={hideTip}>
+      {/* Tooltip */}
+      {tip.show && (
+        <div
+          style={{
+            position: "absolute",
+            left: tip.x,
+            top: tip.y,
+            transform: "translate(-50%, -100%)",
+            background: "#11131a",
+            border: "1px solid #2a2f3a",
+            boxShadow: "0 6px 20px rgba(0,0,0,0.35)",
+            borderRadius: 8,
+            padding: "8px 10px",
+            fontSize: 12,
+            color: "#e5e7eb",
+            pointerEvents: "none",
+            whiteSpace: "nowrap",
+            zIndex: 2,
+          }}
+        >
+          <div style={{ opacity: 0.8, marginBottom: 4 }}>{tip.day}</div>
+          <div>PREPAID: <strong>{tip.prepaid}</strong> kWh</div>
+          <div>PAYG:&nbsp;&nbsp;&nbsp; <strong>{tip.payg}</strong> kWh</div>
+          <div style={{ marginTop: 4, opacity: 0.85 }}>
+            Σύνολο: <strong>{asNum(tip.prepaid) + asNum(tip.payg)}</strong> kWh
+          </div>
         </div>
       )}
+
       <svg width="100%" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="kWh ανά μέρα, PREPAID και PAYG">
         <line x1={pad} y1={axisY} x2={width - pad} y2={axisY} stroke="#2a2a2f" />
-        {bars.map((b, idx) => (
-          <g key={idx}>
-            <rect x={b.x} y={b.yP} width={b.bw} height={Math.max(0, b.hP)} fill="#2dd4bf" stroke="#14b8a6" strokeWidth="0.5">
-              <title>{`${b.day}\nPREPAID: ${fmt(b.prepaid)} kWh\nPAYG: ${fmt(b.payg)} kWh\nΣύνολο: ${fmt(b.total)} kWh`}</title>
-            </rect>
-            <rect x={b.x} y={b.yY} width={b.bw} height={Math.max(0, b.hY)} fill="#94a3b8" stroke="#64748b" strokeWidth="0.5">
-              <title>{`${b.day}\nPREPAID: ${fmt(b.prepaid)} kWh\nPAYG: ${fmt(b.payg)} kWh\nΣύνολο: ${fmt(b.total)} kWh`}</title>
-            </rect>
+        {bars.map((b, i) => (
+          <g key={`${b.day}-${i}`}>
+            {/* PREPAID */}
+            <rect
+              x={b.x}
+              y={b.yP}
+              width={b.bw}
+              height={Math.max(0, b.hP)}
+              fill="#2dd4bf"
+              onMouseMove={(e) => showTip(e, { day: b.day, prepaid: b.prepaid, payg: b.payg })}
+              onMouseEnter={(e) => showTip(e, { day: b.day, prepaid: b.prepaid, payg: b.payg })}
+            />
+            {/* PAYG */}
+            <rect
+              x={b.x}
+              y={b.yY}
+              width={b.bw}
+              height={Math.max(0, b.hY)}
+              fill="#94a3b8"
+              onMouseMove={(e) => showTip(e, { day: b.day, prepaid: b.prepaid, payg: b.payg })}
+              onMouseEnter={(e) => showTip(e, { day: b.day, prepaid: b.prepaid, payg: b.payg })}
+            />
+            {/* labels */}
             {b.total > 0 && (
               <text x={b.x + b.bw / 2} y={Math.min(b.yY, b.yP) - 4} fontSize="10" textAnchor="middle" fill="#c7c7d1">
-                {fmt(b.total)}
+                {Math.round(b.total)}
               </text>
             )}
-            {/* label ανά 4 ΚΑΙ πάντα στο τελευταίο */}
-            {(idx % 4 === 0 || b.isLast) && (
+            {(i % 4 === 0 || b.isLast) && (
               <text x={b.x} y={axisY + 12} fontSize="9" fill="#8b8b93">{b.label}</text>
             )}
           </g>
@@ -131,7 +171,6 @@ function MiniBars({ data }) {
   );
 }
 
-/* ===== card ===== */
 function StatCard({ title, value }) {
   return (
     <div className="card section">
@@ -144,16 +183,14 @@ function StatCard({ title, value }) {
 export default function Analytics({ accountProp }) {
   const [account, setAccount] = useState(accountProp || "");
   const [summary, setSummary] = useState({ kwh_total: 0, kwh_prepaid: 0, kwh_payg: 0, pendingBill: "0" });
-  const [dailyNorm, setDailyNorm] = useState([]); // normalized
-  const [dailyRaw, setDailyRaw] = useState([]);   // server raw
+  const [daily, setDaily] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [mode, setMode] = useState("local"); // "local" | "utc"
 
-  const todayLocal = localKey(new Date());
-  const todayUTC   = utcKey(new Date());
+  // μικρό “παράθυρο ενεργού refresh” μετά από συναλλαγή
+  const activeRefreshUntil = useRef(0);
 
-  // Πάρε wallet από MetaMask αν δεν δόθηκε ως prop
+  // MetaMask account (αν δεν έρχεται ως prop)
   useEffect(() => {
     if (accountProp) return;
     let stop = false;
@@ -168,58 +205,122 @@ export default function Analytics({ accountProp }) {
     return () => { stop = true; };
   }, [accountProp]);
 
-  async function refetch(addr = account, useMode = mode) {
-    if (!addr) return;
-    setLoading(true);
-    setError("");
+  // (προαιρετικό) on-chain fallback μόνο για pendingBill
+  async function fetchPendingOnChain(addr) {
     try {
-      const [sum, d] = await Promise.all([getSummary(addr), getDaily(addr)]);
-      if (DEV) {
-        console.log("[analytics] summary:", sum);
-        console.log("[analytics] daily:", d);
-      }
-      setSummary(sum || {});
+      if (!addr || !window.ethereum || !ethers.isAddress(KWHTokenAddress)) return null;
+      const provider = new ethers.BrowserProvider(window.ethereum);
+      const signer = await provider.getSigner();
+      const t = new ethers.Contract(KWHTokenAddress, KWHTokenABI, signer);
+      const details = await t.getUserDetails(addr);
+      return details?.pendingBill?.toString?.() || details?.[2]?.toString?.() || "0";
+    } catch { return null; }
+  }
+
+  const refetch = useCallback(async (addr = account) => {
+    if (!addr) return;
+    setLoading(true); setError("");
+    try {
+      const [sum, d, pendingFallback] = await Promise.all([
+        getSummary(addr),
+        getDaily(addr),
+        fetchPendingOnChain(addr),
+      ]);
+
+      setSummary({
+        kwh_total  : asNum(sum?.kwh_total   ?? sum?.totalKwh ?? sum?.total),
+        kwh_prepaid: asNum(sum?.kwh_prepaid ?? sum?.prepaidKwh ?? sum?.prepaid),
+        kwh_payg   : asNum(sum?.kwh_payg    ?? sum?.paygKwh ?? sum?.payg),
+        pendingBill: String(
+          (sum?.pendingBill ?? sum?.pendingWei ?? sum?.pending ?? "0") ||
+          pendingFallback || "0"
+        ),
+      });
+
       const raw = Array.isArray(d) ? d : d?.daily || [];
-      setDailyRaw(raw);
-      const norm = normalizeDaily(raw, { days: 30, mode: useMode });
-      setDailyNorm(norm);
+      setDaily(normalizeDaily(raw, 30));
     } catch (e) {
-      console.error(e);
       setError(String(e?.message || e));
     } finally {
       setLoading(false);
     }
-  }
+  }, [account]);
 
-  // Αρχικό fetch + όταν αλλάζει account ή mode
-  useEffect(() => { if (account) refetch(account, mode); }, [account, mode]);
+  // αρχικό load / αλλαγή account
+  useEffect(() => { if (account) refetch(account); }, [account, refetch]);
 
-  // Άκου custom event από το DApp (buy/simulate/pay)
+  // 1) γενικά app events
   useEffect(() => {
-    const onRefresh = () => refetch();
+    let canceled = false;
+    const onRefresh = () => {
+      activeRefreshUntil.current = Date.now() + 45_000;
+      refetch();
+      setTimeout(() => { if (!canceled) refetch(); }, 1200);
+    };
     window.addEventListener("kwh:refresh-analytics", onRefresh);
-    return () => window.removeEventListener("kwh:refresh-analytics", onRefresh);
-  }, [account, mode]);
+    window.addEventListener("tx:append", onRefresh);
+    return () => {
+      canceled = true;
+      window.removeEventListener("kwh:refresh-analytics", onRefresh);
+      window.removeEventListener("tx:append", onRefresh);
+    };
+  }, [refetch]);
 
-  // Ελαφρύ polling
+  // 2) refresh by tx hash 
+  useEffect(() => {
+    const onTxHash = async (ev) => {
+      const txHash = ev?.detail?.txHash || ev?.txHash || ev?.detail;
+      if (!txHash || typeof txHash !== "string" || !txHash.startsWith("0x") || txHash.length !== 66) return;
+      activeRefreshUntil.current = Date.now() + 45_000;
+      try {
+        if (!window.ethereum) return;
+        const provider = new ethers.BrowserProvider(window.ethereum);
+        await provider.waitForTransaction(txHash, 1);
+        await refetch();
+        setTimeout(() => refetch(), 1200);
+      } catch {}
+    };
+    window.addEventListener("kwh:tx-hash", onTxHash);
+    return () => window.removeEventListener("kwh:tx-hash", onTxHash);
+  }, [refetch]);
+
+  // 3) block listener όσο είμαστε σε "active window"
+  useEffect(() => {
+    if (!window.ethereum) return;
+    let alive = true;
+    (async () => {
+      try {
+        const provider = new ethers.BrowserProvider(window.ethereum);
+        provider.on("block", async () => {
+          if (!alive) return;
+          if (Date.now() <= activeRefreshUntil.current) {
+            await refetch();
+          }
+        });
+      } catch {}
+    })();
+    return () => { alive = false; };
+  }, [refetch]);
+
+ 
   useEffect(() => {
     if (!account) return;
-    const id = setInterval(() => refetch(), 20000);
+    const id = setInterval(() => refetch(), 20_000);
     const onVis = () => !document.hidden && refetch();
     document.addEventListener("visibilitychange", onVis);
     return () => { clearInterval(id); document.removeEventListener("visibilitychange", onVis); };
-  }, [account, mode]);
+  }, [account, refetch]);
 
-  // “Σήμερα kWh”
-  const todayRow = dailyNorm.length ? dailyNorm[dailyNorm.length - 1] : { kwh_prepaid: 0, kwh_payg: 0 };
-  const todayTotal = asNum(todayRow.kwh_prepaid) + asNum(todayRow.kwh_payg);
+  
+  useEffect(() => {
+    if (!account) return;
+    let es;
+    try { es = openLiveSession(account, () => refetch(), () => {}); } catch {}
+    return () => { try { es && es.close(); } catch {} };
+  }, [account, refetch]);
 
-  // Debug flags
-  const serverLastKey =
-    (dailyRaw?.length && (dailyRaw[dailyRaw.length - 1].day || dailyRaw[dailyRaw.length - 1].day_key || (dailyRaw[dailyRaw.length - 1].date || "").slice(0,10))) || "-";
-  const serverHasTodayLocal = dailyRaw.some((r) => (r.day || r.day_key || String(r.date||"").slice(0,10)) === todayLocal);
-  const serverHasTodayUTC   = dailyRaw.some((r) => (r.day || r.day_key || String(r.date||"").slice(0,10)) === todayUTC);
-  const normHasToday        = dailyNorm.length && dailyNorm[dailyNorm.length - 1]?.day === (mode === "local" ? todayLocal : todayUTC);
+  const today = daily.length ? daily[daily.length - 1] : { kwh_prepaid: 0, kwh_payg: 0 };
+  const todayTotal = asNum(today.kwh_prepaid) + asNum(today.kwh_payg);
 
   if (!account) {
     return (
@@ -238,9 +339,8 @@ export default function Analytics({ accountProp }) {
         <h1 style={{ margin: 0 }}>Στατιστικά</h1>
         <div className="nav-links" style={{ gap: 10 }}>
           <span className="badge">Wallet: {account || "—"}</span>
-          <button className="btn ghost" onClick={() => refetch()} disabled={loading}>{loading ? "…" : "Refresh"}</button>
-          <button className="btn ghost" onClick={() => setMode((m) => (m === "local" ? "utc" : "local"))}>
-            Mode: {mode.toUpperCase()}
+          <button className="btn ghost" onClick={() => { activeRefreshUntil.current = Date.now() + 45_000; refetch(); }} disabled={loading}>
+            {loading ? "…" : "Refresh"}
           </button>
         </div>
       </div>
@@ -261,31 +361,7 @@ export default function Analytics({ accountProp }) {
 
       <div className="card section">
         <h3 style={{ marginTop: 0 }}>kWh ανά μέρα (PREPAID vs PAYG)</h3>
-        <p style={{ marginTop: -6, opacity: 0.7 }}>PREPAID (μπλε-πράσινο) + PAYG (γκρι-μπλε)</p>
-        <MiniBars data={dailyNorm} />
-      </div>
-
-      {DEV && (
-        <div className="card section" style={{ fontSize: 13 }}>
-          <div style={{ fontWeight: 700, marginBottom: 8 }}>Debug (dev only)</div>
-          <div style={{ display: "grid", gap: 6 }}>
-            <div>Server last key: <code>{String(serverLastKey)}</code></div>
-            <div>Server has today (LOCAL): <code>{String(serverHasTodayLocal)}</code></div>
-            <div>Server has today (UTC): <code>{String(serverHasTodayUTC)}</code></div>
-            <div>Normalized has today ({mode.toUpperCase()}): <code>{String(normHasToday)}</code></div>
-            <div>Today keys → LOCAL: <code>{todayLocal}</code> | UTC: <code>{todayUTC}</code></div>
-            <div>Server rows: <code>{dailyRaw.length}</code></div>
-            <div>Last 5 (normalized):</div>
-            <pre style={{ margin: 0, overflow: "auto", maxHeight: 160 }}>
-{JSON.stringify(dailyNorm.slice(-5), null, 2)}
-            </pre>
-          </div>
-        </div>
-      )}
-
-      <div className="card section">
-        <h3 style={{ marginTop: 0 }}>Τελευταίες προσομοιώσεις</h3>
-        <div style={{ opacity: 0.7, padding: 8 }}>Δεν υπάρχουν ακόμη δεδομένα.</div>
+        <MiniBars data={daily} />
       </div>
     </div>
   );
